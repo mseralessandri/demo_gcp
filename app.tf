@@ -1,4 +1,3 @@
-
 provider "google" {
   project = "microcloud-448817"  # GCP project ID
   region  = "us-central1"               # Region where resources will be created
@@ -39,20 +38,24 @@ resource "google_compute_instance" "app_web_server" {
     #!/bin/bash
     # Update and install dependencies
     sudo apt update
-    sudo apt install -y mysql-client golang ufw
+    sudo apt install -y mysql-client golang git ufw
 
-    # Setup Go application
-    mkdir -p ~/dr-demo
+    # Clone the Go application repository
+    git clone https://github.com/mseralessandri/demo_gcp.git ~/dr-demo
     cd ~/dr-demo
 
+    # Retrieve secrets from Google Secret Manager
+    DB_USER=$(gcloud secrets versions access latest --secret=db-user)
+    DB_PASSWORD=$(gcloud secrets versions access latest --secret=db-password)
+    DB_HOST=$(gcloud secrets versions access latest --secret=db-host)
 
-    # Download the Go app (replace URL with your actual Go code repository or script)
-    echo '${base64encode(file("main.go"))}' | base64 --decode > main.go
-
+    # Export secrets as environment variables
+    echo "export DB_USER=$DB_USER" >> ~/.bashrc
+    echo "export DB_PASSWORD=$DB_PASSWORD" >> ~/.bashrc
+    echo "export DB_HOST=$DB_HOST" >> ~/.bashrc
+    source ~/.bashrc
 
     # Build and run the Go app
-    go get github.com/go-sql-driver/mysql
-    go mod init dr-demo
     go mod tidy
     go build -o dr-demo main.go
     nohup ./dr-demo &
@@ -75,7 +78,7 @@ resource "google_sql_database_instance" "app_db_instance" {
     availability_type = "ZONAL"  # Reduce cost by avoiding high availability
   }
   lifecycle {
-    prevent_destroy = false  # Terraform can destoy it
+    prevent_destroy = false  # Terraform can destroy it
   }
 }
 
@@ -106,4 +109,3 @@ resource "google_compute_firewall" "allow_ssh" {
   source_ranges = ["0.0.0.0/0"]
   target_tags   = ["web"]
 }
-
