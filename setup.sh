@@ -11,19 +11,22 @@ cd ~/dr-demo
 git clone https://github.com/mseralessandri/demo_gcp.git .
 
 # Retrieve secrets from Google Secret Manager
-# First try to get the combined credentials
+# First try to get the combined credentials for username and password
 DB_CREDENTIALS=$(gcloud secrets versions access latest --secret=db_credentials 2>/dev/null)
 if [ $? -eq 0 ]; then
-  # Extract credentials from JSON
+  # Extract username and password from JSON
   DB_USER=$(echo $DB_CREDENTIALS | jq -r '.user')
   DB_PASSWORD=$(echo $DB_CREDENTIALS | jq -r '.password')
-  DB_HOST=$(echo $DB_CREDENTIALS | jq -r '.host')
 else
   # Fallback to individual secrets
   DB_USER=$(gcloud secrets versions access latest --secret=db_user)
   DB_PASSWORD=$(gcloud secrets versions access latest --secret=db_password)
-  DB_HOST=${db_host}
 fi
+
+# Always dynamically retrieve the database host using gcloud
+# This ensures we always have the current IP address
+#DB_HOST=${db_host}
+DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)")
 
 # Create .env file as a fallback if Secret Manager access fails
 cat > .env << EOF
