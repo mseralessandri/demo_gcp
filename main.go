@@ -10,12 +10,10 @@ import (
 	"os"
 	"time"
 
-	
-
-	_"github.com/go-sql-driver/mysql"
-	"github.com/joho/godotenv"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	secretspb "cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/joho/godotenv"
 )
 
 var db *sql.DB
@@ -70,17 +68,39 @@ func getDBCredentials() (string, string, error) {
 	client, err := secretmanager.NewClient(ctx)
 	if err == nil {
 		defer client.Close()
-		secretName := os.Getenv("GCP_SECRET_NAME")
-		if secretName != "" {
-			resp, err := client.AccessSecretVersion(ctx, &secretspb.AccessSecretVersionRequest{Name: secretName})
-			if err == nil {
-				credentials := struct {
-					User     string `json:"user"`
-					Password string `json:"password"`
-				}{}
-				json.Unmarshal(resp.Payload.Data, &credentials)
+
+		// First try to get the combined credentials secret
+		projectID := "microcloud-448817" // GCP project ID
+		secretName := fmt.Sprintf("projects/%s/secrets/db_credentials/versions/latest", projectID)
+		resp, err := client.AccessSecretVersion(ctx, &secretspb.AccessSecretVersionRequest{Name: secretName})
+		if err == nil {
+			credentials := struct {
+				User     string `json:"user"`
+				Password string `json:"password"`
+				Host     string `json:"host"`
+			}{}
+			if err := json.Unmarshal(resp.Payload.Data, &credentials); err == nil {
+				// If we got the host from the secret, set it in the environment
+				if credentials.Host != "" {
+					os.Setenv("DB_HOST", credentials.Host)
+				}
 				return credentials.User, credentials.Password, nil
 			}
+		}
+
+		// Fallback to individual secrets
+		userSecretName := fmt.Sprintf("projects/%s/secrets/db_user/versions/latest", projectID)
+		passwordSecretName := fmt.Sprintf("projects/%s/secrets/db_password/versions/latest", projectID)
+
+		// Try to get user
+		userResp, userErr := client.AccessSecretVersion(ctx, &secretspb.AccessSecretVersionRequest{Name: userSecretName})
+		// Try to get password
+		passwordResp, passwordErr := client.AccessSecretVersion(ctx, &secretspb.AccessSecretVersionRequest{Name: passwordSecretName})
+
+		if userErr == nil && passwordErr == nil {
+			user := string(userResp.Payload.Data)
+			password := string(passwordResp.Payload.Data)
+			return user, password, nil
 		}
 	}
 
@@ -168,7 +188,7 @@ func readHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"database": data,
-		"file":    string(fileData),
+		"file":     string(fileData),
 	})
 }
 
