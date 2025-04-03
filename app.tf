@@ -25,7 +25,9 @@ resource "google_compute_instance" "app_web_server" {
 
   network_interface {
     network= "default"
-    access_config {}  # Assign a public IP
+    access_config {
+      nat_ip = google_compute_address.app_web_server_ip.address  # Use static IP
+    }
   }
 
   service_account {
@@ -95,6 +97,24 @@ resource "google_service_account" "app_service_account" {
 resource "google_project_iam_binding" "secret_manager_access" {
   project = "microcloud-448817"
   role    = "roles/secretmanager.secretAccessor"
+  members = [
+    "serviceAccount:${google_service_account.app_service_account.email}"
+  ]
+}
+
+# Grant the service account access to Cloud SQL
+resource "google_project_iam_binding" "cloud_sql_access" {
+  project = "microcloud-448817"
+  role    = "roles/cloudsql.client"
+  members = [
+    "serviceAccount:${google_service_account.app_service_account.email}"
+  ]
+}
+
+# Grant the service account access to view Cloud SQL instances
+resource "google_project_iam_binding" "cloud_sql_viewer" {
+  project = "microcloud-448817"
+  role    = "roles/cloudsql.viewer"
   members = [
     "serviceAccount:${google_service_account.app_service_account.email}"
   ]

@@ -28,8 +28,14 @@ fi
 if [ -n "${db_host}" ]; then
   DB_HOST=${db_host}
 else
-  # Fallback to dynamic retrieval using gcloud
-  DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)" 2>/dev/null || echo "localhost")
+  # Try to get the database host using gcloud
+  DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
+  
+  # Check if DB_HOST is empty
+  if [ -z "$DB_HOST" ]; then
+    echo "Error: Could not determine database host. DB_HOST is not set."
+    exit 1
+  fi
 fi
 
 # Create .env file as a fallback if Secret Manager access fails
