@@ -23,8 +23,11 @@ go.work.sum
 
 # env file
 .env
-.log
-.hcl
-.tfstate
+*.hcl
+*.log
+terraform.*
+*.txt
+main
+setenv.sh
 .terraform
-
+*.sql
