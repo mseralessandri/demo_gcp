@@ -50,6 +50,11 @@ variable "db_password" {
   type        = string
 }
 
+variable "db_root_password" {
+  description = "Root password for the database instance"
+  type        = string
+}
+
 
 resource "google_secret_manager_secret" "db_credentials" {
   secret_id = "db_credentials"
@@ -102,13 +107,13 @@ resource "google_sql_database_instance" "app_db_instance" {
   region           = "us-central1"
   deletion_protection = false  
 
+  root_password = var.db_root_password
 
   settings {
     tier = "db-g1-small"  # Slightly larger instance for better performance
     availability_type = "ZONAL"
 
-
-  ip_configuration {
+    ip_configuration {
         authorized_networks {
             name            = "Allowed Network"
             value           = "0.0.0.0/0"
@@ -118,10 +123,24 @@ resource "google_sql_database_instance" "app_db_instance" {
   }
 
  
-# Create the database within the instance
+# Create the database within the instance and initialize it
 resource "google_sql_database" "app_database" {
   name     = "dr_demo"
   instance = google_sql_database_instance.app_db_instance.name
+  
+  # Initialize the database using the database.sql file
+  provisioner "local-exec" {
+    command = <<-EOT
+      # Create a temporary SQL file with the variables replaced
+      cat ${path.module}/database.sql | sed -e 's/$${db_user}/${var.db_user}/g' -e 's/$${db_password}/${var.db_password}/g' > /tmp/init_db.sql
+      
+      # Execute the SQL script against the Cloud SQL instance
+      mysql -h ${google_sql_database_instance.app_db_instance.public_ip_address} -u root -p${var.db_root_password} < /tmp/init_db.sql
+      
+      # Remove the temporary file
+      rm /tmp/init_db.sql
+    EOT
+  }
 }
 
 # Create the database user

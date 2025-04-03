@@ -23,10 +23,14 @@ else
   DB_PASSWORD=$(gcloud secrets versions access latest --secret=db_password)
 fi
 
-# Always dynamically retrieve the database host using gcloud
-# This ensures we always have the current IP address
-#DB_HOST=${db_host}
-DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)")
+# Get the database host
+# First try to use the template variable if provided by Terraform
+if [ -n "${db_host}" ]; then
+  DB_HOST=${db_host}
+else
+  # Fallback to dynamic retrieval using gcloud
+  DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)" 2>/dev/null || echo "localhost")
+fi
 
 # Create .env file as a fallback if Secret Manager access fails
 cat > .env << EOF
