@@ -65,27 +65,27 @@ func initDB() (*sql.DB, error) {
 	log.Printf("Using database host: %s", host)
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/dr_demo?parseTime=true", user, password, host)
 	log.Printf("Connecting to MySQL with DSN: %s:%s@tcp(%s:3306)/dr_demo?parseTime=true", user, "********", host)
-	
+
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		log.Printf("Error opening database connection: %v", err)
 		return nil, err
 	}
-	
+
 	// Test the connection
 	err = db.Ping()
 	if err != nil {
 		log.Printf("Error pinging database: %v", err)
 		return db, err
 	}
-	
+
 	log.Println("Successfully connected to the database")
 	return db, nil
 }
 
 func getDBCredentials() (string, string, error) {
 	log.Println("Getting database credentials...")
-	
+
 	ctx := context.Background()
 	client, err := secretmanager.NewClient(ctx)
 	if err == nil {
@@ -95,19 +95,19 @@ func getDBCredentials() (string, string, error) {
 		// First try to get the combined credentials secret
 		projectID := "microcloud-448817" // GCP project ID
 		log.Printf("Using GCP project ID: %s", projectID)
-		
+
 		secretName := fmt.Sprintf("projects/%s/secrets/db_credentials/versions/latest", projectID)
 		log.Printf("Attempting to access secret: %s", secretName)
-		
+
 		resp, err := client.AccessSecretVersion(ctx, &secretspb.AccessSecretVersionRequest{Name: secretName})
 		if err == nil {
 			log.Println("Successfully retrieved secret from Secret Manager")
-			
+
 			credentials := struct {
 				User     string `json:"user"`
 				Password string `json:"password"`
 			}{}
-			
+
 			if err := json.Unmarshal(resp.Payload.Data, &credentials); err == nil {
 				log.Printf("Successfully unmarshaled secret data, user: %s", credentials.User)
 				return credentials.User, credentials.Password, nil
@@ -123,33 +123,33 @@ func getDBCredentials() (string, string, error) {
 
 	// Fallback to environment variables
 	log.Println("Falling back to environment variables for database credentials")
-	
+
 	user := os.Getenv("DB_USER")
 	password := os.Getenv("DB_PASSWORD")
-	
+
 	if user == "" {
 		log.Println("DB_USER environment variable is not set")
 	} else {
 		log.Printf("Found DB_USER in environment variables: %s", user)
 	}
-	
+
 	if password == "" {
 		log.Println("DB_PASSWORD environment variable is not set")
 	} else {
 		log.Println("Found DB_PASSWORD in environment variables")
 	}
-	
+
 	if user == "" || password == "" {
 		log.Println("Missing database credentials in environment variables")
 		return "", "", fmt.Errorf("missing database credentials")
 	}
-	
+
 	return user, password, nil
 }
 
 func writeHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received write request from %s", r.RemoteAddr)
-	
+
 	if r.Method != http.MethodPost {
 		log.Printf("Invalid request method: %s", r.Method)
 		http.Error(w, "Invalid request method", http.StatusMethodNotAllowed)
@@ -170,7 +170,7 @@ func writeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing data", http.StatusBadRequest)
 		return
 	}
-	
+
 	log.Printf("Processing write request with data: %s", request.Data)
 
 	_, err := db.Exec("CREATE TABLE IF NOT EXISTS records (id INT AUTO_INCREMENT PRIMARY KEY, data TEXT)")
@@ -206,7 +206,7 @@ func writeHandler(w http.ResponseWriter, r *http.Request) {
 
 func readHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received read request from %s", r.RemoteAddr)
-	
+
 	rows, err := db.Query("SELECT data FROM records")
 	if err != nil {
 		log.Printf("Error querying database: %v", err)
@@ -224,7 +224,7 @@ func readHandler(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Error scanning row: %v", err)
 		}
 	}
-	
+
 	if err := rows.Err(); err != nil {
 		log.Printf("Error iterating rows: %v", err)
 	}
@@ -245,13 +245,13 @@ func readHandler(w http.ResponseWriter, r *http.Request) {
 		"database": data,
 		"file":     string(fileData),
 	})
-	
+
 	log.Println("Read request completed successfully")
 }
 
 func webHandler(w http.ResponseWriter, r *http.Request) {
 	log.Printf("Received web request from %s", r.RemoteAddr)
-	
+
 	// Check if the web.html file exists
 	_, err := os.Stat("web.html")
 	if err != nil {
@@ -262,7 +262,7 @@ func webHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("Error checking web.html file: %v", err)
 	}
-	
+
 	log.Println("Serving web.html file")
 	http.ServeFile(w, r, "web.html")
 	log.Println("Web request completed successfully")

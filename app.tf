@@ -24,9 +24,10 @@ resource "google_compute_instance" "app_web_server" {
   }
 
   network_interface {
-    network= "default"
+    network = "default"
+
     access_config {
-      nat_ip = google_compute_address.app_web_server_ip.address  # Use static IP
+      # Ephemeral public IP will be assigned
     }
   }
 
