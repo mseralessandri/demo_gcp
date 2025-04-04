@@ -1,80 +1,90 @@
 #!/bin/bash
-# Update and install dependencies
-exec > /var/log/startup-script.log 2>&1
+# Redirect all output to log file
+exec > $HOME/startup-script.log 2>&1
 set -x
-sudo apt update
-sudo apt install -y mysql-client golang ufw jq lynx
 
-# Installa Go 1.24.1
-export GO_VERSION="1.24.1"
-wget https://go.dev/dl/go${"$"}{GO_VERSION}.linux-amd64.tar.gz
-sudo tar -C /usr/local -xzf go${"$"}{GO_VERSION}.linux-amd64.tar.gz
-rm go${"$"}{GO_VERSION}.linux-amd64.tar.gz
+# If running as root, do initial setup then re-run as 'goapp'
+if [ "$(id -u)" -eq 0 ]; then
+  # Create non-root user if it doesn't exist
+  id -u goapp &>/dev/null || useradd -m -s /bin/bash goapp
 
+  apt update
+  apt install -y mysql-client ufw jq lynx curl git
+
+  # Open firewall port for app
+  ufw allow 8080
+
+  # Install Go
+  export GO_VERSION="1.24.1"
+  curl -LO https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz
+  tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz
+  rm go${GO_VERSION}.linux-amd64.tar.gz
+  chown -R goapp:goapp /usr/local/go
+
+  # Re-run this script as non-root user
+  cp "$0" /home/goapp/setup.sh
+  chown goapp:goapp /home/goapp/setup.sh
+  chmod +x /home/goapp/setup.sh
+  sudo -u goapp -i /home/goapp/setup.sh
+
+  exit 0
+fi
+
+# ==== From here on, running as 'goapp' ====
+
+# Set Go environment
 export GOROOT=/usr/local/go
-export GOPATH=/root/go
-export PATH=$PATH:$GOROOT/bin:$GOPATH/bin
-export GOCACHE=/root/.cache/go-build  
-export HOME=/root      
-mkdir -p $GOPATH
+export GOPATH=$HOME/go
+export GOCACHE=$HOME/.cache/go-build
+export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
+mkdir -p "$GOPATH"
 
-
-# Setup Go application
+# Clone application
 mkdir -p ~/dr-demo
 cd ~/dr-demo
+git clone https://github.com/mseralessandri/demo_gcp.git . || exit 1
 
-# Clone the repository
-git clone https://github.com/mseralessandri/demo_gcp.git .
-
-# Retrieve secrets from Google Secret Manager
-# First try to get the combined credentials for username and password
+echo "Retrieve DB credentials..."
+set +x
+# Retrieve secrets
 DB_CREDENTIALS=$(gcloud secrets versions access latest --secret=db_credentials 2>/dev/null)
 if [ $? -eq 0 ]; then
-  # Extract username and password from JSON
-  DB_USER=$(echo $DB_CREDENTIALS | jq -r '.user')
-  DB_PASSWORD=$(echo $DB_CREDENTIALS | jq -r '.password')
+  DB_USER=$(echo "$DB_CREDENTIALS" | jq -r '.user')
+  DB_PASSWORD=$(echo "$DB_CREDENTIALS" | jq -r '.password')
 else
-  # Fallback to individual secrets
   DB_USER=$(gcloud secrets versions access latest --secret=db_user)
   DB_PASSWORD=$(gcloud secrets versions access latest --secret=db_password)
 fi
+set -x
 
-# Get the database host
-# First try to use the template variable if provided by Terraform
+
+# Get DB host from Terraform or fallback to gcloud
 DB_HOST="${db_host}"
-
-if [ -n "$DB_HOST" ]; then
-  echo "Using DB host from template: $DB_HOST"
-else
-  # Try to get the database host using gcloud
-  echo "Falling back to fetching DB host via gcloud..."
+if [ -z "$DB_HOST" ]; then
   DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
-  
-  # Check if DB_HOST is empty
   if [ -z "$DB_HOST" ]; then
-    echo "Error: Could not determine database host. DB_HOST is not set."
+    echo "Error: Cannot determine DB host"
     exit 1
   fi
 fi
 
-# Create .env file as a fallback if Secret Manager access fails
-cat > .env << EOF
+# Write .env file
+cat > .env <<EOF
 DB_USER=$DB_USER
 DB_PASSWORD=$DB_PASSWORD
 DB_HOST=$DB_HOST
 EOF
 
-# Export database credentials
+# Export env vars
 export DB_USER DB_PASSWORD DB_HOST
 
-# Build and run the Go app
+# Initialize and build the app
+go mod init dr-demo 2>/dev/null || true
 go get github.com/go-sql-driver/mysql
 go get github.com/joho/godotenv
 go get cloud.google.com/go/secretmanager/apiv1
-go mod init dr-demo
 go mod tidy
 go build -o dr-demo main.go
-nohup ./dr-demo &
 
-# Optionally, open port for the Go app (if needed)
-sudo ufw allow 8080
+# Start the app
+nohup ./dr-demo > app.log 2>&1 &

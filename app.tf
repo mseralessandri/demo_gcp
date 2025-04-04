@@ -39,6 +39,7 @@ resource "google_compute_instance" "app_web_server" {
   # Use template_file to render the setup.sh script with the correct DB_HOST value
   metadata_startup_script = templatefile("${path.module}/setup.sh", {
     db_host = google_sql_database_instance.app_db_instance.public_ip_address
+    GO_VERSION = "1.24.1"
   })
   
 }
