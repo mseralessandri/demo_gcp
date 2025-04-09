@@ -141,8 +141,6 @@ resource "google_sql_database_instance" "app_db_instance" {
             name            = "Allowed Network"
             value           = "0.0.0.0/0"
         }
-        # Allow both SSL and non-SSL connections
-        ssl_mode = "ALLOW_UNENCRYPTED_AND_ENCRYPTED"
     }
     }
   }

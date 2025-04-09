@@ -64,15 +64,8 @@ func initDB() (*sql.DB, error) {
 	}
 	log.Printf("Using database host: %s", host)
 	
-	// Add SSL/TLS support based on environment variable
-	sslParam := ""
-	if os.Getenv("USE_SSL") == "true" {
-		sslParam = "&tls=true"
-		log.Println("SSL/TLS enabled for database connection")
-	}
-	
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/dr_demo?parseTime=true%s", user, password, host, sslParam)
-	log.Printf("Connecting to MySQL with DSN: %s:%s@tcp(%s:3306)/dr_demo?parseTime=true%s", user, "********", host, sslParam)
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/dr_demo?parseTime=true", user, password, host)
+	log.Printf("Connecting to MySQL with DSN: %s:%s@tcp(%s:3306)/dr_demo?parseTime=true", user, "********", host)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
