@@ -128,10 +128,11 @@ cat > .env <<EOF
 DB_USER=$DB_USER
 DB_PASSWORD=$DB_PASSWORD
 DB_HOST=$DB_HOST
+USE_SSL=true
 EOF
 
 # Export env vars
-export DB_USER DB_PASSWORD DB_HOST
+export DB_USER DB_PASSWORD DB_HOST USE_SSL=true
 
 # Initialize and build the app
 go mod init dr-demo 2>/dev/null || true
