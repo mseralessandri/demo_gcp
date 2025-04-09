@@ -9,10 +9,65 @@ if [ "$(id -u)" -eq 0 ]; then
   id -u goapp &>/dev/null || useradd -m -s /bin/bash goapp
 
   apt update
-  apt install -y mysql-client ufw jq lynx curl git
+  apt install -y mysql-client ufw jq lynx curl git nginx
 
-  # Open firewall port for app
+  # Open firewall ports for app and web
   ufw allow 8080
+  ufw allow 80
+  ufw allow 443
+
+  # Generate self-signed certificate
+  mkdir -p /etc/ssl/private
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/ssl/private/nginx-selfsigned.key \
+    -out /etc/ssl/certs/nginx-selfsigned.crt \
+    -subj "/C=US/ST=State/L=City/O=Organization/CN=$(curl -s http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip -H 'Metadata-Flavor: Google')"
+
+  # Store certificate and key in Secret Manager
+  gcloud secrets create ssl_cert --replication-policy="user-managed" \
+    --locations="us-central1" --data-file="/etc/ssl/certs/nginx-selfsigned.crt" || \
+    gcloud secrets versions add ssl_cert --data-file="/etc/ssl/certs/nginx-selfsigned.crt"
+    
+  gcloud secrets create ssl_key --replication-policy="user-managed" \
+    --locations="us-central1" --data-file="/etc/ssl/private/nginx-selfsigned.key" || \
+    gcloud secrets versions add ssl_key --data-file="/etc/ssl/private/nginx-selfsigned.key"
+
+  # Create Nginx configuration
+  cat > /etc/nginx/sites-available/app <<EOF
+server {
+    listen 80;
+    server_name _;
+    
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    server_name _;
+    
+    ssl_certificate /etc/ssl/certs/nginx-selfsigned.crt;
+    ssl_certificate_key /etc/ssl/private/nginx-selfsigned.key;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    
+    location / {
+        proxy_pass http://localhost:8080;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+}
+EOF
+
+  # Enable the site
+  ln -s /etc/nginx/sites-available/app /etc/nginx/sites-enabled/
+  rm -f /etc/nginx/sites-enabled/default
+
+  # Restart Nginx
+  systemctl restart nginx
 
   # Install Go
   export GO_VERSION="1.24.1"

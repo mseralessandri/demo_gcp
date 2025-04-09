@@ -40,6 +40,7 @@ resource "google_compute_instance" "app_web_server" {
   metadata_startup_script = templatefile("${path.module}/setup.sh", {
     db_host = google_sql_database_instance.app_db_instance.public_ip_address
     GO_VERSION = "1.24.1"
+
   })
   
 }
@@ -173,15 +174,15 @@ resource "google_sql_user" "app_db_user" {
   host     = "%"  # Allow connections from any host
 }
 
-# Create a firewall rule to allow HTTP traffic to the web server
+# Create a firewall rule to allow HTTP, HTTPS, and application traffic to the web server
 resource "google_compute_firewall" "allow_http" {
   name    = "allow-http"
-  network = "default"  # Using the default network for SSH access
+  network = "default"  # Using the default network for web access
 
 
   allow {
     protocol = "tcp"
-    ports    = ["8080"]
+    ports    = ["80", "443", "8080"]
   }
 
   source_ranges = ["0.0.0.0/0"]
