@@ -94,10 +94,16 @@ export GOCACHE=$HOME/.cache/go-build
 export PATH=$GOROOT/bin:$GOPATH/bin:$PATH
 mkdir -p "$GOPATH"
 
-# Clone application
+# Clone or update application
 mkdir -p ~/dr-demo
 cd ~/dr-demo
-git clone https://github.com/mseralessandri/demo_gcp.git . || exit 1
+if [ -d ".git" ]; then
+  # Repository already exists, pull latest changes
+  git pull
+else
+  # Fresh clone
+  git clone https://github.com/mseralessandri/demo_gcp.git . || exit 1
+fi
 
 echo "Retrieve DB credentials..."
 set +x
@@ -116,10 +122,22 @@ set -x
 # Get DB host from Terraform or fallback to gcloud
 DB_HOST="${db_host}"
 if [ -z "$DB_HOST" ]; then
+  # Try the base database instance first
   DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
+  
+  # If base instance not found, try the DR database instance
   if [ -z "$DB_HOST" ]; then
-    echo "Error: Cannot determine DB host"
-    exit 1
+    DB_HOST=$(gcloud sql instances describe app-db-instance-dr --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
+    
+    # If neither instance is found, exit with error
+    if [ -z "$DB_HOST" ]; then
+      echo "Error: Cannot determine DB host from either app-db-instance or app-db-instance-dr"
+      exit 1
+    else
+      echo "Using DR database instance: app-db-instance-dr"
+    fi
+  else
+    echo "Using base database instance: app-db-instance"
   fi
 fi
 

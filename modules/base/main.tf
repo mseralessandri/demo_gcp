@@ -1,14 +1,12 @@
-provider "google" {
-  project = "microcloud-448817"  # GCP project ID
-  region  = "us-central1"        # Region where resources will be created
-}
+# Base infrastructure module
 
+# Provider configuration is defined in the root module
 
 # Create a cost-effective but faster VM for the web application running Go app
 resource "google_compute_instance" "app_web_server" {
   name         = "app-web-server"
-  machine_type = "e2-small"  # Upgraded to e2-small for better performance
-  zone         = "us-central1-a"
+  machine_type = var.vm_machine_type
+  zone         = "${var.region}-a"
   tags         = ["web"]
   
   # Ensure the database is created before the VM
@@ -19,7 +17,7 @@ resource "google_compute_instance" "app_web_server" {
 
   boot_disk {
     initialize_params {
-      image = "ubuntu-os-cloud/ubuntu-2404-lts-amd64"  # Ubuntu 24.04 as the OS
+      image = var.vm_image
     }
   }
 
@@ -37,41 +35,23 @@ resource "google_compute_instance" "app_web_server" {
   }
 
   # Use template_file to render the setup.sh script with the correct DB_HOST value
-  metadata_startup_script = templatefile("${path.module}/setup.sh", {
+  metadata_startup_script = templatefile(var.setup_script_path, {
     db_host = google_sql_database_instance.app_db_instance.public_ip_address
-    GO_VERSION = "1.24.1"
-
+    GO_VERSION = var.go_version
   })
-  
 }
 
-variable "db_user" {
-  description = "Database username for the application"
-  type        = string
-}
-
-variable "db_password" {
-  description = "Database password for the application"
-  type        = string
-}
-
-variable "db_root_password" {
-  description = "Root password for the database instance"
-  type        = string
-}
-
-
+# Create a secret for database credentials
 resource "google_secret_manager_secret" "db_credentials" {
   secret_id = "db_credentials"
   replication {
     user_managed {
       replicas {
-        location = "us-central1"
+        location = var.region
       }
     }
   }
 }
-
 
 # Create a combined secret with all database credentials
 resource "google_secret_manager_secret_version" "db_credentials_value" {
@@ -79,7 +59,6 @@ resource "google_secret_manager_secret_version" "db_credentials_value" {
   secret_data = jsonencode({
     user     = var.db_user
     password = var.db_password
-    //host     = google_sql_database_instance.app_db_instance.public_ip_address
   })
   
   # Ensure the database is created before the secret
@@ -98,7 +77,7 @@ resource "google_service_account" "app_service_account" {
 
 # Grant the service account access to Secret Manager
 resource "google_project_iam_binding" "secret_manager_access" {
-  project = "microcloud-448817"
+  project = var.project_id
   role    = "roles/secretmanager.secretAccessor"
   members = [
     "serviceAccount:${google_service_account.app_service_account.email}"
@@ -107,7 +86,7 @@ resource "google_project_iam_binding" "secret_manager_access" {
 
 # Grant the service account access to Cloud SQL
 resource "google_project_iam_binding" "cloud_sql_access" {
-  project = "microcloud-448817"
+  project = var.project_id
   role    = "roles/cloudsql.client"
   members = [
     "serviceAccount:${google_service_account.app_service_account.email}"
@@ -116,7 +95,7 @@ resource "google_project_iam_binding" "cloud_sql_access" {
 
 # Grant the service account access to view Cloud SQL instances
 resource "google_project_iam_binding" "cloud_sql_viewer" {
-  project = "microcloud-448817"
+  project = var.project_id
   role    = "roles/cloudsql.viewer"
   members = [
     "serviceAccount:${google_service_account.app_service_account.email}"
@@ -127,13 +106,13 @@ resource "google_project_iam_binding" "cloud_sql_viewer" {
 resource "google_sql_database_instance" "app_db_instance" {
   name             = "app-db-instance"
   database_version = "MYSQL_8_0"
-  region           = "us-central1"
+  region           = var.region
   deletion_protection = false  
 
   root_password = var.db_root_password
 
   settings {
-    tier = "db-g1-small"  # Slightly larger instance for better performance
+    tier = var.db_tier
     availability_type = "ZONAL"
 
     ip_configuration {
@@ -142,10 +121,9 @@ resource "google_sql_database_instance" "app_db_instance" {
             value           = "0.0.0.0/0"
         }
     }
-    }
   }
+}
 
- 
 # Create the database within the instance and initialize it
 resource "google_sql_database" "app_database" {
   name     = "dr_demo"
@@ -155,7 +133,7 @@ resource "google_sql_database" "app_database" {
   provisioner "local-exec" {
     command = <<-EOT
       # Create a temporary SQL file with the variables replaced
-      cat ${path.module}/database.sql | sed -e 's/$${db_user}/${var.db_user}/g' -e 's/$${db_password}/${var.db_password}/g' > /tmp/init_db.sql
+      cat ${var.database_sql_path} | sed -e 's/$${db_user}/${var.db_user}/g' -e 's/$${db_password}/${var.db_password}/g' > /tmp/init_db.sql
       
       # Execute the SQL script against the Cloud SQL instance
       mysql -h ${google_sql_database_instance.app_db_instance.public_ip_address} -u root -p${var.db_root_password} < /tmp/init_db.sql
@@ -178,7 +156,6 @@ resource "google_sql_user" "app_db_user" {
 resource "google_compute_firewall" "allow_http" {
   name    = "allow-http"
   network = "default"  # Using the default network for web access
-
 
   allow {
     protocol = "tcp"
