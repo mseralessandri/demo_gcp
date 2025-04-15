@@ -122,23 +122,22 @@ set -x
 # Get DB host from Terraform or fallback to gcloud
 DB_HOST="${db_host}"
 if [ -z "$DB_HOST" ]; then
-  # Try the base database instance first
-  DB_HOST=$(gcloud sql instances describe app-db-instance --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
-  
-  # If base instance not found, try the DR database instance
-  if [ -z "$DB_HOST" ]; then
-    DB_HOST=$(gcloud sql instances describe app-db-instance-dr --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
-    
-    # If neither instance is found, exit with error
-    if [ -z "$DB_HOST" ]; then
-      echo "Error: Cannot determine DB host from either app-db-instance or app-db-instance-dr"
-      exit 1
-    else
-      echo "Using DR database instance: app-db-instance-dr"
+  # Try all possible database instances
+  for DB_INSTANCE in "app-db-instance" "app-db-instance-dr"; do
+    DB_HOST=$(gcloud sql instances describe $DB_INSTANCE --format="value(ipAddresses[0].ipAddress)" 2>/dev/null)
+    if [ ! -z "$DB_HOST" ]; then
+      echo "Using database instance: $DB_INSTANCE"
+      break
     fi
-  else
-    echo "Using base database instance: app-db-instance"
+  done
+  
+  # If no instance found, exit with error
+  if [ -z "$DB_HOST" ]; then
+    echo "Error: Cannot determine DB host from any database instance"
+    exit 1
   fi
+else
+  echo "Using provided database host: $DB_HOST"
 fi
 
 # Write .env file

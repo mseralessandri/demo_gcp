@@ -1,0 +1,59 @@
+# =============================================================================
+# TERRAFORM VARIABLES FOR DR ACTIVE-PASSIVE COMPLETE ZONAL IMPLEMENTATION
+# =============================================================================
+# This file contains example values for the variables used in the implementation.
+# Replace these values with your own before deploying.
+
+# -----------------------------------------------------------------------------
+# PROJECT CONFIGURATION
+# -----------------------------------------------------------------------------
+
+project_id = "your-project-id"  # Replace with your GCP project ID
+region     = "us-central1"
+primary_zone = "us-central1-a"
+standby_zone = "us-central1-c"
+
+# -----------------------------------------------------------------------------
+# VM CONFIGURATION
+# -----------------------------------------------------------------------------
+
+vm_machine_type = "e2-medium"
+vm_image        = "debian-cloud/debian-11"
+disk_size_gb    = 20
+boot_disk_size_gb = 10
+setup_script_path = "../setup.sh"
+go_version      = "1.24.1"
+
+# -----------------------------------------------------------------------------
+# DATABASE CONFIGURATION
+# -----------------------------------------------------------------------------
+
+db_tier     = "db-g1-small"
+database_sql_path = "../database.sql"
+db_root_password = "dr_demo_root_password"
+db_name     = "dr_demo"  # Changed to match the module
+db_user     = "dr_demo_user"
+db_password = "dr_demo_password"
+
+# -----------------------------------------------------------------------------
+# BACKUP CONFIGURATION
+# -----------------------------------------------------------------------------
+
+backup_start_time = "02:00"  # 2 AM
+transaction_log_retention_days = 7
+retained_backups = 7
+
+# -----------------------------------------------------------------------------
+# MAINTENANCE CONFIGURATION
+# -----------------------------------------------------------------------------
+
+maintenance_day  = 7  # Sunday
+maintenance_hour = 2  # 2 AM
+
+# -----------------------------------------------------------------------------
+# MONITORING CONFIGURATION
+# -----------------------------------------------------------------------------
+
+notification_email = "maria.seralessandri@canonical.com"  # Replace with your email
+error_threshold    = 5
+replication_lag_threshold_ms = 60000  # 60 seconds
