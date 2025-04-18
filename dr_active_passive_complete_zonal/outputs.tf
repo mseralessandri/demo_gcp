@@ -60,14 +60,24 @@ output "database_ip" {
 # NETWORKING OUTPUTS
 # -----------------------------------------------------------------------------
 
-output "load_balancer_ip" {
-  description = "IP address of the load balancer"
-  value       = module.dr_complete.load_balancer_ip
+output "load_balancer_http_ip" {
+  description = "HTTP IP address of the load balancer"
+  value       = module.dr_complete.load_balancer_http_ip
 }
 
-output "app_url" {
-  description = "URL of the application"
-  value       = module.dr_complete.app_url
+output "load_balancer_https_ip" {
+  description = "HTTPS IP address of the load balancer"
+  value       = module.dr_complete.load_balancer_https_ip
+}
+
+output "app_http_url" {
+  description = "HTTP URL of the application"
+  value       = module.dr_complete.app_http_url
+}
+
+output "app_https_url" {
+  description = "HTTPS URL of the application"
+  value       = module.dr_complete.app_https_url
 }
 
 # -----------------------------------------------------------------------------

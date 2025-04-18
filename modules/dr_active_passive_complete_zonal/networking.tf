@@ -31,6 +31,11 @@ resource "google_compute_instance_group" "primary_group" {
   zone      = var.primary_zone
   instances = [google_compute_instance.primary_vm.id]
   
+  named_port {
+    name = "http8080"
+    port = 8080
+  }
+  
   # Prevent Terraform from trying to update the instance group if the VM is stopped
   lifecycle {
     ignore_changes = [instances]
@@ -42,6 +47,16 @@ resource "google_compute_instance_group" "standby_group" {
   name      = "app-standby-group"
   zone      = var.standby_zone
   instances = []  # Empty by default, will be populated during failover
+  
+  named_port {
+    name = "http8080"
+    port = 8080
+  }
+  
+  # Ensure named ports are preserved even when instances change
+  lifecycle {
+    ignore_changes = [instances]
+  }
 }
 
 # -----------------------------------------------------------------------------
@@ -53,6 +68,7 @@ resource "google_compute_instance_group" "standby_group" {
 resource "google_compute_backend_service" "app_backend" {
   name          = "app-backend-service"
   health_checks = [google_compute_health_check.app_health_check.id]
+  port_name     = "http8080"
   
   backend {
     group = google_compute_instance_group.primary_group.id
@@ -73,17 +89,42 @@ resource "google_compute_url_map" "app_url_map" {
   default_service = google_compute_backend_service.app_backend.id
 }
 
+# Self-signed SSL certificate
+resource "google_compute_ssl_certificate" "app_ssl_cert" {
+  name        = "app-ssl-cert"
+  private_key = file("${path.module}/../../dr_active_passive_complete_zonal/certs/ssl.key")
+  certificate = file("${path.module}/../../dr_active_passive_complete_zonal/certs/ssl.crt")
+  
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 # HTTP proxy
 resource "google_compute_target_http_proxy" "app_http_proxy" {
   name    = "app-http-proxy"
   url_map = google_compute_url_map.app_url_map.id
 }
 
-# Global forwarding rule
-resource "google_compute_global_forwarding_rule" "app_forwarding_rule" {
-  name       = "app-forwarding-rule"
+# HTTPS proxy
+resource "google_compute_target_https_proxy" "app_https_proxy" {
+  name             = "app-https-proxy"
+  url_map          = google_compute_url_map.app_url_map.id
+  ssl_certificates = [google_compute_ssl_certificate.app_ssl_cert.id]
+}
+
+# HTTP forwarding rule
+resource "google_compute_global_forwarding_rule" "app_http_forwarding_rule" {
+  name       = "app-http-forwarding-rule"
   target     = google_compute_target_http_proxy.app_http_proxy.id
   port_range = "80"
+}
+
+# HTTPS forwarding rule
+resource "google_compute_global_forwarding_rule" "app_https_forwarding_rule" {
+  name       = "app-https-forwarding-rule"
+  target     = google_compute_target_https_proxy.app_https_proxy.id
+  port_range = "443"
 }
 
 # -----------------------------------------------------------------------------

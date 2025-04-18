@@ -5,60 +5,105 @@ This module implements a comprehensive disaster recovery (DR) solution using Goo
 ## Architecture
 
 ```mermaid
-graph TD
+graph LR
+    Client[Client] -->|HTTPS:443| HTTPSFR[HTTPS Forwarding Rule]
+    Client -->|HTTP:80| HTTPFR[HTTP Forwarding Rule]
+    
+    HTTPSFR --> HTTPSProxy[HTTPS Proxy]
+    HTTPFR --> HTTPProxy[HTTP Proxy]
+    
+    HTTPSProxy -->|SSL Termination| SSLCert[SSL Certificate]
+    SSLCert --> URLMap[URL Map]
+    HTTPProxy --> URLMap
+    
+    URLMap --> BackendService[Backend Service<br>port_name: http8080]
+    BackendService --> HC[Health Check<br>port: 8080<br>path: /web]
+    
+    BackendService --> PrimaryIG[Primary Instance Group<br>named_port: http8080:8080]
+    BackendService --> StandbyIG[Standby Instance Group<br>named_port: http8080:8080]
+    
     subgraph "Primary Zone (us-central1-a)"
-        PVM[Primary VM<br>ACTIVE]
-        RPDisk1[Regional Persistent Disk<br>Primary Replica]
-        PGroup[Primary Instance Group]
+        PrimaryIG --> PrimaryVM[Primary VM<br>app listening on 0.0.0.0:8080]
+        PrimaryVM --> PrimaryBoot[Primary Boot Disk]
+        PrimaryVM --> RegionalDisk[Regional Persistent Disk]
     end
     
     subgraph "Standby Zone (us-central1-c)"
-        SVM[Standby VM<br>DORMANT]
-        RPDisk2[Regional Persistent Disk<br>Secondary Replica]
-        SGroup[Standby Instance Group]
+        StandbyIG --> StandbyVM[Standby VM<br>app listening on 0.0.0.0:8080]
+        StandbyVM --> StandbyBoot[Standby Boot Disk]
+        StandbyVM -.->|Attached during failover| RegionalDisk
     end
     
-    RPDisk1 -- "Synchronous Replication" --> RPDisk2
-    
     subgraph "Database (Regional)"
-        PDB[(Primary DB<br>us-central1-c)]
-        SDB[(Standby DB<br>us-central1-f)]
-        PDB -- "Auto Failover" --> SDB
+        PrimaryVM -->|Read/Write| CloudSQL[Cloud SQL with HA]
+        StandbyVM -.->|Failover Only| CloudSQL
+        CloudSQL --> PrimaryDB[(Primary DB<br>us-central1-a)]
+        CloudSQL --> StandbyDB[(Standby DB<br>us-central1-c)]
+        PrimaryDB <-->|Sync Replication| StandbyDB
     end
     
     subgraph "Backup & Recovery"
-        Snapshots[(Disk Snapshots)]
-        DBBackups[(Database Backups)]
-        PITR[Point-in-Time Recovery]
-        
-        RPDisk1 -- "Regular Snapshots" --> Snapshots
-        PDB -- "Automated Backups" --> DBBackups
-        DBBackups -- "Enables" --> PITR
+        CloudSQL -->|Automated Backups| Backups[(Cloud SQL Backups)]
+        CloudSQL -->|Binary Logging| BinLogs[(Binary Logs)]
+        RegionalDisk -->|Snapshots| DiskSnapshots[(Disk Snapshots)]
     end
     
-    subgraph "Testing & Monitoring"
-        TestScript[DR Test Script]
-        CloudFunc[Cloud Function]
-        CloudSched[Cloud Scheduler]
-        Dashboard[Monitoring Dashboard]
-        Alerts[Alert Policies]
-        
-        CloudSched -- "Triggers" --> CloudFunc
-        CloudFunc -- "Executes" --> TestScript
-        TestScript -- "Tests" --> PVM
-        TestScript -- "Tests" --> SVM
-        TestScript -- "Tests" --> PDB
-        
-        Dashboard -- "Visualizes" --> PVM
-        Dashboard -- "Visualizes" --> SVM
-        Dashboard -- "Visualizes" --> PDB
+    classDef https fill:#32CD32,stroke:#333,stroke-width:1px;
+    classDef http fill:#FFD700,stroke:#333,stroke-width:1px;
+    classDef shared fill:#4682B4,stroke:#333,stroke-width:1px;
+    classDef primary fill:#6495ED,stroke:#333,stroke-width:1px;
+    classDef standby fill:#20B2AA,stroke:#333,stroke-width:1px;
+    classDef db fill:#DAA520,stroke:#333,stroke-width:1px;
+    classDef backup fill:#DA70D6,stroke:#333,stroke-width:1px;
+    
+    class HTTPSFR,HTTPSProxy,SSLCert https;
+    class HTTPFR,HTTPProxy http;
+    class URLMap,BackendService,HC shared;
+    class PrimaryIG,PrimaryVM,PrimaryBoot primary;
+    class StandbyIG,StandbyVM,StandbyBoot standby;
+    class CloudSQL,PrimaryDB,StandbyDB db;
+    class Backups,BinLogs,DiskSnapshots backup;
+```
+
+### Failover Scenarios
+
+```mermaid
+graph LR
+    subgraph "Normal Operation"
+        Client1[Client] -->|HTTP/HTTPS| LB1[Load Balancer]
+        LB1 -->|Active| Primary1[Primary VM<br>us-central1-a<br>RUNNING]
+        LB1 -.->|Standby| Standby1[Standby VM<br>us-central1-c<br>STOPPED]
+        Primary1 -->|Attached| Disk1[Regional Disk]
+        Primary1 -->|Read/Write| DB1[Cloud SQL Primary<br>us-central1-a]
+        DB1 -->|Replication| DBStandby1[Cloud SQL Standby<br>us-central1-c]
     end
     
-    LB[Load Balancer]
-    LB -- "Routes to" --> PGroup
-    LB -- "Routes to (during failover)" --> SGroup
+    subgraph "During Failover"
+        Client2[Client] -->|HTTP/HTTPS| LB2[Load Balancer]
+        LB2 -.->|Failing| Primary2[Primary VM<br>us-central1-a<br>FAILING]
+        LB2 -->|Starting| Standby2[Standby VM<br>us-central1-c<br>STARTING]
+        Primary2 -.->|Detaching| Disk2[Regional Disk]
+        Standby2 -.->|Attaching| Disk2
+        DB2[Cloud SQL Primary<br>us-central1-a] -->|Failover| DBStandby2[Cloud SQL Standby<br>us-central1-c]
+    end
     
-    Users[Users] --> LB
+    subgraph "After Failover"
+        Client3[Client] -->|HTTP/HTTPS| LB3[Load Balancer]
+        LB3 -.->|Inactive| Primary3[Primary VM<br>us-central1-a<br>STOPPED]
+        LB3 -->|Active| Standby3[Standby VM<br>us-central1-c<br>RUNNING]
+        Standby3 -->|Attached| Disk3[Regional Disk]
+        Standby3 -->|Read/Write| DBStandby3[Cloud SQL Primary<br>us-central1-c]
+        DBStandby3 -->|Replication| DB3[Cloud SQL Standby<br>us-central1-a]
+    end
+    
+    classDef normal fill:#6495ED,stroke:#333,stroke-width:1px;
+    classDef failing fill:#FF6347,stroke:#333,stroke-width:1px;
+    classDef failover fill:#FFA500,stroke:#333,stroke-width:1px;
+    classDef recovered fill:#20B2AA,stroke:#333,stroke-width:1px;
+    
+    class Client1,LB1,Primary1,Standby1,Disk1,DB1,DBStandby1 normal;
+    class Client2,LB2,Primary2,Standby2,Disk2,DB2,DBStandby2 failover;
+    class Client3,LB3,Primary3,Standby3,Disk3,DB3,DBStandby3 recovered;
 ```
 
 ## Key Components
@@ -74,7 +119,11 @@ graph TD
 
 ### 3. Networking
 - **Load Balancer**: Routes traffic to the active instance
-- **Health Checks**: Monitors instance health
+  - Supports both HTTP (port 80) and HTTPS (port 443)
+  - SSL termination at the load balancer level
+  - Self-signed certificates for HTTPS
+- **Health Checks**: Monitors instance health on port 8080
+- **Named Ports**: Configured for port 8080 (http8080)
 
 ### 4. Backup & Recovery
 - **Disk Snapshots**: Regular snapshots of persistent disks
@@ -213,8 +262,10 @@ The module includes several alert policies:
 | database_name | Name of the Cloud SQL instance |
 | database_connection_name | Connection name of the Cloud SQL instance |
 | database_ip | IP address of the Cloud SQL instance |
-| load_balancer_ip | IP address of the load balancer |
-| app_url | URL of the application |
+| load_balancer_http_ip | HTTP IP address of the load balancer |
+| load_balancer_https_ip | HTTPS IP address of the load balancer |
+| app_http_url | HTTP URL of the application |
+| app_https_url | HTTPS URL of the application |
 | backup_bucket_name | Name of the backup storage bucket |
 | snapshot_schedule_name | Name of the snapshot schedule |
 | dashboard_url | URL to the monitoring dashboard |
@@ -231,6 +282,20 @@ The module includes several alert policies:
 | RPO (Recovery Point Objective) | 0 for disk, < 1 hour for VM | Potential data loss window |
 | Failover Success Rate | > 99% | Percentage of successful failovers |
 | Backup Success Rate | > 99.9% | Percentage of successful backups |
+
+## SSL/TLS Implementation
+
+This module includes HTTPS support with the following components:
+
+- **SSL Certificate Resource**: `google_compute_ssl_certificate.app_ssl_cert`
+- **HTTPS Proxy**: `google_compute_target_https_proxy.app_https_proxy`
+- **HTTPS Forwarding Rule**: `google_compute_global_forwarding_rule.app_https_forwarding_rule`
+
+The SSL certificate is expected to be provided as files:
+- Private key: `certs/ssl.key`
+- Certificate: `certs/ssl.crt`
+
+The module is configured to use self-signed certificates by default, but you can replace them with certificates from a trusted Certificate Authority.
 
 ## Limitations
 

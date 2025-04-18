@@ -4,7 +4,88 @@ This directory contains the implementation of the DR active-passive complete zon
 
 ## Architecture
 
-![DR Architecture](architecture_diagram.png)
+```mermaid
+graph LR
+    Client[Client] -->|HTTPS:443| HTTPSFR[HTTPS Forwarding Rule]
+    Client -->|HTTP:80| HTTPFR[HTTP Forwarding Rule]
+    
+    HTTPSFR --> HTTPSProxy[HTTPS Proxy]
+    HTTPFR --> HTTPProxy[HTTP Proxy]
+    
+    HTTPSProxy -->|SSL Termination| SSLCert[SSL Certificate]
+    SSLCert --> URLMap[URL Map]
+    HTTPProxy --> URLMap
+    
+    URLMap --> BackendService[Backend Service<br>port_name: http8080]
+    BackendService --> HC[Health Check<br>port: 8080<br>path: /web]
+    
+    BackendService --> PrimaryIG[Primary Instance Group<br>named_port: http8080:8080]
+    BackendService --> StandbyIG[Standby Instance Group<br>named_port: http8080:8080]
+    
+    PrimaryIG --> PrimaryVM[Primary VM<br>app listening on 0.0.0.0:8080]
+    StandbyIG --> StandbyVM[Standby VM<br>app listening on 0.0.0.0:8080]
+    
+    PrimaryVM --> RegionalDisk[Regional Persistent Disk]
+    StandbyVM -.-> RegionalDisk
+    
+    PrimaryVM -->|Read/Write| CloudSQL[Cloud SQL with HA]
+    StandbyVM -.->|Failover Only| CloudSQL
+    
+    classDef https fill:#32CD32,stroke:#333,stroke-width:1px;
+    classDef http fill:#FFD700,stroke:#333,stroke-width:1px;
+    classDef shared fill:#4682B4,stroke:#333,stroke-width:1px;
+    classDef primary fill:#6495ED,stroke:#333,stroke-width:1px;
+    classDef standby fill:#20B2AA,stroke:#333,stroke-width:1px;
+    classDef storage fill:#FF6347,stroke:#333,stroke-width:1px;
+    
+    class HTTPSFR,HTTPSProxy,SSLCert https;
+    class HTTPFR,HTTPProxy http;
+    class URLMap,BackendService,HC shared;
+    class PrimaryIG,PrimaryVM primary;
+    class StandbyIG,StandbyVM standby;
+    class RegionalDisk,CloudSQL storage;
+```
+
+### Failover Scenarios
+
+```mermaid
+graph LR
+    subgraph "Normal Operation"
+        Client1[Client] -->|HTTP/HTTPS| LB1[Load Balancer]
+        LB1 -->|Active| Primary1[Primary VM<br>us-central1-a<br>RUNNING]
+        LB1 -.->|Standby| Standby1[Standby VM<br>us-central1-c<br>STOPPED]
+        Primary1 -->|Attached| Disk1[Regional Disk]
+        Primary1 -->|Read/Write| DB1[Cloud SQL Primary<br>us-central1-a]
+        DB1 -->|Replication| DBStandby1[Cloud SQL Standby<br>us-central1-c]
+    end
+    
+    subgraph "During Failover"
+        Client2[Client] -->|HTTP/HTTPS| LB2[Load Balancer]
+        LB2 -.->|Failing| Primary2[Primary VM<br>us-central1-a<br>FAILING]
+        LB2 -->|Starting| Standby2[Standby VM<br>us-central1-c<br>STARTING]
+        Primary2 -.->|Detaching| Disk2[Regional Disk]
+        Standby2 -.->|Attaching| Disk2
+        DB2[Cloud SQL Primary<br>us-central1-a] -->|Failover| DBStandby2[Cloud SQL Standby<br>us-central1-c]
+    end
+    
+    subgraph "After Failover"
+        Client3[Client] -->|HTTP/HTTPS| LB3[Load Balancer]
+        LB3 -.->|Inactive| Primary3[Primary VM<br>us-central1-a<br>STOPPED]
+        LB3 -->|Active| Standby3[Standby VM<br>us-central1-c<br>RUNNING]
+        Standby3 -->|Attached| Disk3[Regional Disk]
+        Standby3 -->|Read/Write| DBStandby3[Cloud SQL Primary<br>us-central1-c]
+        DBStandby3 -->|Replication| DB3[Cloud SQL Standby<br>us-central1-a]
+    end
+    
+    classDef normal fill:#6495ED,stroke:#333,stroke-width:1px;
+    classDef failing fill:#FF6347,stroke:#333,stroke-width:1px;
+    classDef failover fill:#FFA500,stroke:#333,stroke-width:1px;
+    classDef recovered fill:#20B2AA,stroke:#333,stroke-width:1px;
+    
+    class Client1,LB1,Primary1,Standby1,Disk1,DB1,DBStandby1 normal;
+    class Client2,LB2,Primary2,Standby2,Disk2,DB2,DBStandby2 failover;
+    class Client3,LB3,Primary3,Standby3,Disk3,DB3,DBStandby3 recovered;
+```
 
 The architecture includes:
 
@@ -12,9 +93,29 @@ The architecture includes:
 - **Standby VM** in the standby zone (us-central1-c)
 - **Regional Persistent Disk** for synchronous replication between zones
 - **Cloud SQL with HA** for database high availability with binary logging for point-in-time recovery
-- **Load Balancer** for traffic routing
+- **Global Load Balancer** with both HTTP and HTTPS support
+  - SSL termination at the load balancer level
+  - Self-signed certificates for HTTPS
 - **Backup and Recovery** capabilities
 - **Monitoring and Alerting** with a hybrid approach
+
+## SSL/TLS Support
+
+The solution includes HTTPS support with the following features:
+
+- **SSL Termination at Load Balancer**: All SSL/TLS processing happens at the load balancer level, reducing computational load on application servers
+- **Self-Signed Certificates**: The implementation uses self-signed certificates for HTTPS
+- **Certificate Generation**: A script (`generate_certs.sh`) is provided to generate self-signed certificates
+- **Dual Protocol Support**: Both HTTP and HTTPS endpoints are available
+
+To regenerate certificates:
+```bash
+cd dr_active_passive_complete_zonal
+./generate_certs.sh
+terraform apply
+```
+
+For production use, consider replacing self-signed certificates with certificates from a trusted Certificate Authority.
 
 ## Setup Instructions
 
@@ -58,7 +159,14 @@ You can use the provided script to set up all prerequisites:
 
 4. **Verify Deployment**:
    ```bash
+   # Check status
    ./dr_demo_test.sh status
+   
+   # Access the application via HTTP
+   curl http://$(terraform output -raw load_balancer_http_ip)/web
+   
+   # Access the application via HTTPS (ignore certificate warnings)
+   curl -k https://$(terraform output -raw load_balancer_https_ip)/web
    ```
 
 ## Testing the DR Solution
@@ -143,6 +251,14 @@ Access the custom DR dashboard for focused DR metrics:
    ```
    - Show the current state of primary and standby resources
    - Explain the active-passive setup
+   - Demonstrate both HTTP and HTTPS access:
+     ```bash
+     # HTTP access
+     curl http://$(terraform output -raw load_balancer_http_ip)/web
+     
+     # HTTPS access
+     curl -k https://$(terraform output -raw load_balancer_https_ip)/web
+     ```
 
 3. **Failover Demo** (5 minutes):
    ```bash

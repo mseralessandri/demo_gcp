@@ -7,6 +7,7 @@ terraform.tfstate.backup
 *.tfstate.backup
 *.tfvars
 !terraform.tfvars.example
+certs
 
 # Local .terraform directories
 **/.terraform/*

@@ -47,14 +47,16 @@ check_metrics() {
 # Function to verify application
 verify_app() {
   local IP=$1
+  local PORT=$2
+  local PROTOCOL=$3
   local MAX_RETRIES=10
   local RETRY_INTERVAL=10
   local RETRIES=0
   
-  status "Verifying application at http://$IP:8080/web"
+  status "Verifying application at $PROTOCOL://$IP:$PORT/web"
   
   while [ $RETRIES -lt $MAX_RETRIES ]; do
-    curl -s "http://$IP:8080/web" > /dev/null
+    curl -s -k "$PROTOCOL://$IP:$PORT/web" > /dev/null
     if [ $? -eq 0 ]; then
       echo "SUCCESS: Application is responding"
       return 0
@@ -66,6 +68,41 @@ verify_app() {
   done
   
   echo "ERROR: Application is not responding after $MAX_RETRIES attempts"
+  return 1
+}
+
+# Function to verify application through load balancer
+verify_app_lb() {
+  status "Verifying application through load balancer"
+  
+  # Get load balancer IPs
+  LB_HTTP_IP=$(terraform output -raw load_balancer_http_ip 2>/dev/null)
+  LB_HTTPS_IP=$(terraform output -raw load_balancer_https_ip 2>/dev/null)
+  
+  if [ -z "$LB_HTTP_IP" ] && [ -z "$LB_HTTPS_IP" ]; then
+    echo "ERROR: Could not get load balancer IP addresses from Terraform outputs"
+    return 1
+  fi
+  
+  # Try HTTPS first
+  if [ ! -z "$LB_HTTPS_IP" ]; then
+    echo "Verifying HTTPS endpoint..."
+    verify_app "$LB_HTTPS_IP" "443" "https"
+    if [ $? -eq 0 ]; then
+      return 0
+    fi
+  fi
+  
+  # Try HTTP if HTTPS failed or is not available
+  if [ ! -z "$LB_HTTP_IP" ]; then
+    echo "Verifying HTTP endpoint..."
+    verify_app "$LB_HTTP_IP" "80" "http"
+    if [ $? -eq 0 ]; then
+      return 0
+    fi
+  fi
+  
+  echo "ERROR: Application is not responding through load balancer"
   return 1
 }
 
@@ -330,9 +367,13 @@ case "$1" in
       --zone=us-central1-c \
       --instances=app-web-server-dr-standby
     
-    # 10. Verify application is responding
+    # 10. Verify application is responding through load balancer
+    status "Verifying application through load balancer"
+    verify_app_lb
+    
+    # Also verify direct VM access for debugging
     DR_IP=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
-    verify_app $DR_IP
+    verify_app "$DR_IP" "8080" "http"
     
     # 11. Calculate RTO
     end_time=$(date +%s)
@@ -374,9 +415,13 @@ case "$1" in
     status "Waiting for application to initialize"
     sleep 30
     
-    # 5. Verify application is responding
+    # 5. Verify application is responding through load balancer
+    status "Verifying application through load balancer"
+    verify_app_lb
+    
+    # Also verify direct VM access for debugging
     PRIMARY_IP=$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
-    verify_app $PRIMARY_IP
+    verify_app "$PRIMARY_IP" "8080" "http"
     
     # 6. Remove the standby VM from the DR instance group
     status "Removing standby VM from instance group"
@@ -622,3 +667,14 @@ EOF
     exit 1
     ;;
 esac
+
+
+# Get the load balancer IPs
+# terraform output load_balancer_http_ip
+# terraform output load_balancer_https_ip
+
+# Test HTTP access
+#curl http://<load_balancer_http_ip>/web
+
+# Test HTTPS access (with -k to ignore certificate warnings)
+#curl -k https://<load_balancer_https_ip>/web

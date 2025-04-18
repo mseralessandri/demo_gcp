@@ -68,14 +68,24 @@ output "database_self_link" {
 # -----------------------------------------------------------------------------
 # Information about the load balancer and networking resources
 
-output "load_balancer_ip" {
-  description = "IP address of the load balancer"
-  value       = google_compute_global_forwarding_rule.app_forwarding_rule.ip_address
+output "load_balancer_http_ip" {
+  description = "HTTP IP address of the load balancer"
+  value       = google_compute_global_forwarding_rule.app_http_forwarding_rule.ip_address
 }
 
-output "app_url" {
-  description = "URL of the application"
-  value       = "http://${google_compute_global_forwarding_rule.app_forwarding_rule.ip_address}/web"
+output "load_balancer_https_ip" {
+  description = "HTTPS IP address of the load balancer"
+  value       = google_compute_global_forwarding_rule.app_https_forwarding_rule.ip_address
+}
+
+output "app_http_url" {
+  description = "HTTP URL of the application"
+  value       = "http://${google_compute_global_forwarding_rule.app_http_forwarding_rule.ip_address}/web"
+}
+
+output "app_https_url" {
+  description = "HTTPS URL of the application"
+  value       = "https://${google_compute_global_forwarding_rule.app_https_forwarding_rule.ip_address}/web"
 }
 
 # -----------------------------------------------------------------------------
