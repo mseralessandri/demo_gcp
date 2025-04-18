@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"time"
@@ -46,7 +47,13 @@ func main() {
 	http.HandleFunc("/web", webHandler)
 
 	log.Println("Starting application...")
-	log.Fatal(http.ListenAndServe("127.0.0.1:8080", nil))
+	log.Println("Listening on all interfaces (0.0.0.0:8080)")
+	// Force listening on all interfaces
+	listener, err := net.Listen("tcp", "0.0.0.0:8080")
+	if err != nil {
+		log.Fatalf("Failed to create listener: %v", err)
+	}
+	log.Fatal(http.Serve(listener, nil))
 }
 
 func initDB() (*sql.DB, error) {
