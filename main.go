@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"time"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
@@ -19,6 +20,37 @@ import (
 
 var db *sql.DB
 var logFile *os.File
+
+const (
+	rootDiskFile     = "data_backup.txt"
+	regionalDiskFile = "/mnt/regional-disk/regional_data.txt"
+)
+
+// Helper function to write to a file
+func writeToFile(filepath string, data string) {
+	// Create directory if it doesn't exist
+	dir := path.Dir(filepath)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			log.Printf("Failed to create directory %s: %v", dir, err)
+			return
+		}
+	}
+	
+	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		log.Printf("Failed to open file %s: %v", filepath, err)
+		return
+	}
+	defer file.Close()
+	
+	timestamp := time.Now().Format(time.RFC3339)
+	hostname, _ := os.Hostname()
+	logEntry := fmt.Sprintf("%s [%s]: %s\n", timestamp, hostname, data)
+	if _, err := file.WriteString(logEntry); err != nil {
+		log.Printf("Failed to write to file %s: %v", filepath, err)
+	}
+}
 
 func main() {
 	// Open log file
@@ -195,17 +227,11 @@ func writeHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write data to file
-	file, err := os.OpenFile("data_backup.txt", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Printf("Failed to open file: %v", err)
-	} else {
-		defer file.Close()
-		logEntry := fmt.Sprintf("%s: %s\n", time.Now().Format(time.RFC3339), request.Data)
-		if _, err := file.WriteString(logEntry); err != nil {
-			log.Printf("Failed to write to file: %v", err)
-		}
-	}
+	// Write data to root disk file
+	writeToFile(rootDiskFile, request.Data)
+	
+	// Write data to regional disk file
+	writeToFile(regionalDiskFile, request.Data)
 
 	log.Printf("Data written successfully: %s", request.Data)
 	w.Header().Set("Content-Type", "application/json")
@@ -239,19 +265,29 @@ func readHandler(w http.ResponseWriter, r *http.Request) {
 
 	log.Printf("Retrieved %d records from database", len(data))
 
-	// Read from file
-	fileData, err := os.ReadFile("data_backup.txt")
+	// Read from root disk file
+	rootFileData, err := os.ReadFile(rootDiskFile)
 	if err != nil {
-		log.Printf("Error reading backup file: %v", err)
-		fileData = []byte("No file data available")
+		log.Printf("Error reading root disk file: %v", err)
+		rootFileData = []byte("No root disk data available")
 	} else {
-		log.Printf("Read %d bytes from backup file", len(fileData))
+		log.Printf("Read %d bytes from root disk file", len(rootFileData))
+	}
+	
+	// Read from regional disk file
+	regionalFileData, err := os.ReadFile(regionalDiskFile)
+	if err != nil {
+		log.Printf("Error reading regional disk file: %v", err)
+		regionalFileData = []byte("No regional disk data available")
+	} else {
+		log.Printf("Read %d bytes from regional disk file", len(regionalFileData))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"database": data,
-		"file":     string(fileData),
+		"rootDiskFile": string(rootFileData),
+		"regionalDiskFile": string(regionalFileData),
 	})
 
 	log.Println("Read request completed successfully")

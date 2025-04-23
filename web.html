@@ -31,14 +31,35 @@
             background-color: #e95420;
             color: white;
         }
+        .disk-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #fff;
+        }
+        .root-disk {
+            border-left: 5px solid #ff9800;
+        }
+        .regional-disk {
+            border-left: 5px solid #4caf50;
+        }
+        .disk-info {
+            text-align: left;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
         pre {
             background: white;
             padding: 10px;
-            border: 1px solid #e95420;
+            border: 1px solid #ddd;
             display: inline-block;
             text-align: left;
-            width: 80%;
+            width: 100%;
             color: #333;
+            overflow: auto;
+            max-height: 200px;
+            margin: 0;
         }
         input[type="text"], button {
             padding: 8px;
@@ -74,8 +95,17 @@
         </tr>
     </table>
     
-    <h2>Data from File</h2>
-    <pre id="fileData">Loading...</pre>
+    <h2>Storage Replication Comparison</h2>
+    
+    <div class="disk-section root-disk">
+        <div class="disk-info">Root Disk (Snapshot-based Replication)</div>
+        <pre id="rootDiskData">Loading...</pre>
+    </div>
+    
+    <div class="disk-section regional-disk">
+        <div class="disk-info">Regional Disk (Synchronous Replication)</div>
+        <pre id="regionalDiskData">Loading...</pre>
+    </div>
     
     <script>
         document.getElementById("dataForm").addEventListener("submit", function(event) {
@@ -107,7 +137,8 @@
                         row.insertCell(0).innerText = index + 1;
                         row.insertCell(1).innerText = entry;
                     });
-                    document.getElementById('fileData').innerText = data.file;
+                    document.getElementById('rootDiskData').innerText = data.rootDiskFile;
+                    document.getElementById('regionalDiskData').innerText = data.regionalDiskFile;
                 })
                 .catch(error => console.error('Error fetching data:', error));
         }

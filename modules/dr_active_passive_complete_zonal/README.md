@@ -25,7 +25,7 @@ graph LR
     subgraph "Primary Zone (us-central1-a)"
         PrimaryIG --> PrimaryVM[Primary VM<br>app listening on 0.0.0.0:8080]
         PrimaryVM --> PrimaryBoot[Primary Boot Disk]
-        PrimaryVM --> RegionalDisk[Regional Persistent Disk]
+        PrimaryVM --> RegionalDisk[Regional Persistent Disk<br>Mounted at /mnt/regional-disk]
     end
     
     subgraph "Standby Zone (us-central1-c)"
@@ -106,12 +106,30 @@ graph LR
     class Client3,LB3,Primary3,Standby3,Disk3,DB3,DBStandby3 recovered;
 ```
 
+## Disk Replication Demonstration
+
+This module demonstrates two different replication methods:
+
+1. **Synchronous Replication** using a regional persistent disk
+   - Data is written to both zones simultaneously
+   - Zero RPO (Recovery Point Objective)
+   - Immediate availability during failover
+   - Files are stored in `/mnt/regional-disk/`
+
+2. **Snapshot-based Replication** for the root disk
+   - Data is backed up periodically via snapshots
+   - Non-zero RPO (depends on snapshot frequency)
+   - Requires restoration during failover
+   - Files are stored in the application directory
+
+The web interface displays data from both disks to clearly show the difference in replication methods during failover testing.
+
 ## Key Components
 
 ### 1. Compute Resources
 - **Primary VM**: Active VM in the primary zone (us-central1-a)
 - **Standby VM**: Dormant VM in the standby zone (us-central1-c)
-- **Regional Persistent Disk**: Synchronously replicates data between zones
+- **Regional Persistent Disk**: Synchronously replicates data between zones, mounted at `/mnt/regional-disk`
 
 ### 2. Database Resources
 - **Cloud SQL with HA**: Primary instance with standby replica in different zone

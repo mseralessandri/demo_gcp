@@ -25,7 +25,7 @@ graph LR
     PrimaryIG --> PrimaryVM[Primary VM<br>app listening on 0.0.0.0:8080]
     StandbyIG --> StandbyVM[Standby VM<br>app listening on 0.0.0.0:8080]
     
-    PrimaryVM --> RegionalDisk[Regional Persistent Disk]
+    PrimaryVM --> RegionalDisk[Regional Persistent Disk<br>Mounted at /mnt/regional-disk]
     StandbyVM -.-> RegionalDisk
     
     PrimaryVM -->|Read/Write| CloudSQL[Cloud SQL with HA]
@@ -98,6 +98,24 @@ The architecture includes:
   - Self-signed certificates for HTTPS
 - **Backup and Recovery** capabilities
 - **Monitoring and Alerting** with a hybrid approach
+
+## Disk Replication Demonstration
+
+This implementation demonstrates two different replication methods:
+
+1. **Synchronous Replication** using a regional persistent disk
+   - Data is written to both zones simultaneously
+   - Zero RPO (Recovery Point Objective)
+   - Immediate availability during failover
+   - Files are stored in `/mnt/regional-disk/`
+
+2. **Snapshot-based Replication** for the root disk
+   - Data is backed up periodically via snapshots
+   - Non-zero RPO (depends on snapshot frequency)
+   - Requires restoration during failover
+   - Files are stored in the application directory
+
+The web interface displays data from both disks to clearly show the difference in replication methods during failover testing.
 
 ## SSL/TLS Support
 

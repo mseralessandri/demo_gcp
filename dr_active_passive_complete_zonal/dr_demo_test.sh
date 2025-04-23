@@ -350,6 +350,19 @@ case "$1" in
     status "Starting DR VM"
     gcloud compute instances start app-web-server-dr-standby --zone=us-central1-c
     
+    # 6.1 Ensure regional disk is properly mounted
+    status "Ensuring regional disk is properly mounted"
+    gcloud compute ssh app-web-server-dr-standby --zone=us-central1-c --command="
+      if [ ! -d '/mnt/regional-disk' ]; then
+        sudo mkdir -p /mnt/regional-disk
+      fi
+      
+      if ! mount | grep -q '/mnt/regional-disk'; then
+        sudo mount /dev/disk/by-id/google-app-data-disk /mnt/regional-disk
+        sudo chown -R goapp:goapp /mnt/regional-disk
+      fi
+    "
+    
     # 7. Wait for VM to be ready
     status "Waiting for DR VM to be ready"
     while [[ "$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(status)')" != "RUNNING" ]]; do
