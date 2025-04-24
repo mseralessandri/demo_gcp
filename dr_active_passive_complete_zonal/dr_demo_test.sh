@@ -312,6 +312,24 @@ case "$1" in
       sleep 5
     done
     
+    # Ensure the regional disk is attached to the standby VM
+    status "Ensuring regional disk is attached to standby VM"
+    
+    # Check if the regional disk is already attached
+    ATTACHED_DISKS=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(disks[].source)")
+    if [[ $ATTACHED_DISKS != *"app-regional-disk"* ]]; then
+      echo "Attaching regional disk to standby VM..."
+      gcloud compute instances attach-disk app-web-server-dr-standby \
+        --disk=projects/microcloud-448817/regions/us-central1/disks/app-regional-disk \
+        --device-name=app-data-disk \
+        --zone=us-central1-c
+      
+      # Wait for attachment to complete
+      sleep 10
+    else
+      echo "Regional disk is already attached to standby VM"
+    fi
+    
     # Detach the current disk if attached
     gcloud compute instances detach-disk app-web-server-dr-standby \
       --disk=app-standby-boot-disk \
@@ -349,19 +367,6 @@ case "$1" in
     # 6. Start the DR VM
     status "Starting DR VM"
     gcloud compute instances start app-web-server-dr-standby --zone=us-central1-c
-    
-    # 6.1 Ensure regional disk is properly mounted
-    status "Ensuring regional disk is properly mounted"
-    gcloud compute ssh app-web-server-dr-standby --zone=us-central1-c --command="
-      if [ ! -d '/mnt/regional-disk' ]; then
-        sudo mkdir -p /mnt/regional-disk
-      fi
-      
-      if ! mount | grep -q '/mnt/regional-disk'; then
-        sudo mount /dev/disk/by-id/google-app-data-disk /mnt/regional-disk
-        sudo chown -R goapp:goapp /mnt/regional-disk
-      fi
-    "
     
     # 7. Wait for VM to be ready
     status "Waiting for DR VM to be ready"

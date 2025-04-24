@@ -34,9 +34,9 @@ if [ "$(id -u)" -eq 0 ]; then
       mkfs.ext4 "$DISK_DEVICE"
     fi
     
-    # Add to fstab for persistent mounting
+    # Add to fstab for persistent mounting with nofail option to prevent boot failures
     if ! grep -q "$MOUNT_POINT" /etc/fstab; then
-      echo "$DISK_DEVICE $MOUNT_POINT ext4 discard,defaults 0 2" >> /etc/fstab
+      echo "$DISK_DEVICE $MOUNT_POINT ext4 discard,defaults,nofail 0 2" >> /etc/fstab
     fi
     
     # Mount the disk
