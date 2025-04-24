@@ -36,6 +36,10 @@ resource "google_compute_disk" "standby_boot_disk" {
   zone  = var.standby_zone
   image = var.vm_image
   size  = var.boot_disk_size_gb
+  
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # Primary boot disk
@@ -44,6 +48,10 @@ resource "google_compute_disk" "primary_boot_disk" {
   zone  = var.primary_zone
   image = var.vm_image
   size  = var.boot_disk_size_gb
+  
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # -----------------------------------------------------------------------------
