@@ -17,17 +17,16 @@ status() {
 check_metrics() {
   status "Checking monitoring metrics"
   
-  # Check VM uptime
-  VM_UPTIME=$(gcloud monitoring metrics list --filter="metric.type=compute.googleapis.com/instance/uptime resource.type=gce_instance" --format="value(points.value.double_value)" 2>/dev/null || echo "N/A")
-  echo "VM uptime (seconds): $VM_UPTIME"
+  # Check VM uptime - using gcloud compute instances describe instead of monitoring metrics
+  VM_STATUS=$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format="value(status)" 2>/dev/null || echo "STOPPED")
+  echo "Primary VM status: $VM_STATUS"
   
-  # Check database uptime
-  DB_UPTIME=$(gcloud monitoring metrics list --filter="metric.type=cloudsql.googleapis.com/database/up" --format="value(points.value.bool_value)" 2>/dev/null || echo "N/A")
-  echo "Database uptime status: $DB_UPTIME"
+  STANDBY_STATUS=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(status)" 2>/dev/null || echo "STOPPED")
+  echo "Standby VM status: $STANDBY_STATUS"
   
-  # Check database CPU
-  DB_CPU=$(gcloud monitoring metrics list --filter="metric.type=cloudsql.googleapis.com/database/cpu/utilization" --format="value(points.value.double_value)" 2>/dev/null || echo "N/A")
-  echo "Database CPU utilization: $DB_CPU"
+  # Check database status
+  DB_STATUS=$(gcloud sql instances describe app-db-instance-dr --format="value(state)" 2>/dev/null || echo "UNKNOWN")
+  echo "Database status: $DB_STATUS"
   
   # Check error logs
   ERROR_COUNT=$(gcloud logging read "resource.type=gce_instance AND textPayload=~\"Error|ERROR|error|Exception|EXCEPTION|exception\"" --limit=10 --format="value(timestamp)" 2>/dev/null | wc -l)
@@ -222,7 +221,7 @@ case "$1" in
       --format="table(instance)" 2>/dev/null || echo "Not found"
     
     # Check metrics
-    check_metrics
+    #check_metrics
     ;;
     
   failover)
@@ -232,7 +231,7 @@ case "$1" in
     start_time=$(date +%s)
     
     # 1. Capture metrics before failover
-    check_metrics
+    #check_metrics
     
     # 2. Check if any snapshots exist for the primary boot disk
     SNAPSHOT_COUNT=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" --format="value(name)" | wc -l)
@@ -275,6 +274,17 @@ case "$1" in
     status "Simulating primary zone failure"
     gcloud compute instances stop app-web-server-dr-primary --zone=us-central1-a --quiet
     
+    # 3.1 Detach the regional disk from the primary VM
+    status "Detaching regional disk from primary VM"
+    gcloud compute instances detach-disk app-web-server-dr-primary \
+      --disk=app-regional-disk \
+      --disk-scope=regional \
+      --zone=us-central1-a 2>/dev/null || true
+    
+    # Wait for detachment to complete
+    echo "Waiting for disk detachment to complete..."
+    sleep 10
+    
     # 4. Create a new disk from the latest boot disk snapshot
     status "Creating new disk from latest boot disk snapshot"
     LATEST_BOOT_SNAPSHOT=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" --sort-by=~creationTimestamp --limit=1 --format="value(name)")
@@ -288,13 +298,13 @@ case "$1" in
     
     # Create the new disk with matching UEFI settings
     if [[ -n "$BOOT_DISK_UEFI" ]]; then
-      echo "Boot disk has UEFI enabled, creating disk with UEFI support"
+  #    echo "Boot disk has UEFI enabled, creating disk with UEFI support"
       gcloud compute disks create app-standby-disk-failover \
         --source-snapshot=$LATEST_BOOT_SNAPSHOT \
         --zone=us-central1-c \
         --guest-os-features=UEFI_COMPATIBLE
     else
-      echo "Boot disk has standard BIOS, creating disk without UEFI support"
+  #    echo "Boot disk has standard BIOS, creating disk without UEFI support"
       gcloud compute disks create app-standby-disk-failover \
         --source-snapshot=$LATEST_BOOT_SNAPSHOT \
         --zone=us-central1-c
@@ -320,7 +330,8 @@ case "$1" in
     if [[ $ATTACHED_DISKS != *"app-regional-disk"* ]]; then
       echo "Attaching regional disk to standby VM..."
       gcloud compute instances attach-disk app-web-server-dr-standby \
-        --disk=projects/microcloud-448817/regions/us-central1/disks/app-regional-disk \
+        --disk=app-regional-disk \
+        --disk-scope=regional \
         --device-name=app-data-disk \
         --zone=us-central1-c
       
@@ -403,7 +414,7 @@ case "$1" in
     write_custom_metric "success_rate" "1.0" "failover"
     
     # 13. Check metrics after failover
-    check_metrics
+    #check_metrics
     
     status "Failover test completed"
     echo "To failback, run: $0 failback"
@@ -416,24 +427,57 @@ case "$1" in
     start_time=$(date +%s)
     
     # 1. Capture metrics before failback
-    check_metrics
+    #check_metrics
     
-    # 2. Start the primary VM
+    # 2. Stop the standby VM
+    status "Stopping standby VM"
+    gcloud compute instances stop app-web-server-dr-standby --zone=us-central1-c --quiet
+    
+    # Wait for VM to stop
+    while [[ "$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(status)' 2>/dev/null)" == "RUNNING" ]]; do
+      echo "Waiting for VM to stop..."
+      sleep 5
+    done
+    
+    # 3. Detach the regional disk from the standby VM
+    status "Detaching regional disk from standby VM"
+    gcloud compute instances detach-disk app-web-server-dr-standby \
+      --disk=app-regional-disk \
+      --disk-scope=regional \
+      --zone=us-central1-c 2>/dev/null || true
+    
+    # Wait for detachment to complete
+    echo "Waiting for disk detachment to complete..."
+    sleep 10
+    
+    # 4. Start the primary VM
     status "Starting primary VM"
     gcloud compute instances start app-web-server-dr-primary --zone=us-central1-a
     
-    # 3. Wait for VM to be ready
+    # 5. Wait for VM to be ready
     status "Waiting for primary VM to be ready"
     while [[ "$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format='value(status)')" != "RUNNING" ]]; do
       echo "Waiting for VM to start..."
       sleep 5
     done
     
-    # 4. Wait for application to initialize
+    # 6. Attach the regional disk to the primary VM
+    status "Attaching regional disk to primary VM"
+    gcloud compute instances attach-disk app-web-server-dr-primary \
+      --disk=app-regional-disk \
+      --disk-scope=regional \
+      --device-name=app-data-disk \
+      --zone=us-central1-a
+    
+    # Wait for attachment to complete
+    echo "Waiting for disk attachment to complete..."
+    sleep 10
+    
+    # 7. Wait for application to initialize
     status "Waiting for application to initialize"
     sleep 30
     
-    # 5. Verify application is responding through load balancer
+    # 8. Verify application is responding through load balancer
     status "Verifying application through load balancer"
     verify_app_lb
     
@@ -441,15 +485,11 @@ case "$1" in
     PRIMARY_IP=$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
     verify_app "$PRIMARY_IP" "8080" "http"
     
-    # 6. Remove the standby VM from the DR instance group
+    # 9. Remove the standby VM from the DR instance group
     status "Removing standby VM from instance group"
     gcloud compute instance-groups unmanaged remove-instances app-standby-group \
       --zone=us-central1-c \
       --instances=app-web-server-dr-standby 2>/dev/null || true
-    
-    # 7. Stop the DR VM
-    status "Stopping DR VM"
-    gcloud compute instances stop app-web-server-dr-standby --zone=us-central1-c
     
     # 8. Calculate RTO
     end_time=$(date +%s)
@@ -461,7 +501,7 @@ case "$1" in
     write_custom_metric "success_rate" "1.0" "failback"
     
     # 10. Check metrics after failback
-    check_metrics
+    #check_metrics
     
     status "Failback test completed"
     ;;
