@@ -1,0 +1,517 @@
+main:
+  params: [force_snapshot]
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - primary_zone: "us-central1-a"
+          - standby_zone: "us-central1-c"
+          - force_snapshot: ${default(force_snapshot, false)}
+          - start_time: ${sys.now()}
+          - stop_standby_operation: null
+          - detach_boot_operation: null
+    
+    # Step 1: Check if snapshots exist and create if needed
+    - check_boot_snapshots:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots?filter=sourceDisk%3Dapp-primary-boot-disk&maxResults=1"}
+          auth:
+            type: OAuth2
+        result: snapshot_response
+    
+    - create_snapshot_if_needed:
+        switch:
+          - condition: ${force_snapshot or not("items" in snapshot_response.body) or len(snapshot_response.body.items) == 0}
+            next: create_boot_snapshot
+        next: check_data_snapshots
+    
+    - create_boot_snapshot:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/disks/app-primary-boot-disk/createSnapshot"}
+          auth:
+            type: OAuth2
+          body:
+            name: ${"boot-snapshot-" + string(int(sys.now() / 1000))}
+            description: "Automatic snapshot for DR testing"
+        result: create_snapshot_operation
+    
+    - wait_for_boot_snapshot:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + create_snapshot_operation.body.name}
+          auth:
+            type: OAuth2
+        result: snapshot_status
+    
+    - check_boot_snapshot_done:
+        switch:
+          - condition: ${snapshot_status.body.status != "DONE"}
+            next: sleep_then_check_boot_snapshot
+        next: check_data_snapshots
+    
+    - sleep_then_check_boot_snapshot:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_boot_snapshot
+    
+    # Step 2: Check if data disk snapshots exist and create if needed
+    - check_data_snapshots:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots?filter=sourceDisk%3Dapp-regional-disk&maxResults=1"}
+          auth:
+            type: OAuth2
+        result: data_snapshot_response
+    
+    - create_data_snapshot_if_needed:
+        switch:
+          - condition: ${force_snapshot or not("items" in data_snapshot_response.body) or len(data_snapshot_response.body.items) == 0}
+            next: create_data_snapshot
+        next: stop_primary_vm
+    
+    - create_data_snapshot:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/regions/us-central1/disks/app-regional-disk/createSnapshot"}
+          auth:
+            type: OAuth2
+          body:
+            name: ${"data-snapshot-" + string(int(sys.now() / 1000))}
+            description: "Automatic snapshot of regional disk for DR testing"
+        result: create_data_snapshot_operation
+    
+    - wait_for_data_snapshot:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/regions/us-central1/operations/" + create_data_snapshot_operation.body.name}
+          auth:
+            type: OAuth2
+        result: data_snapshot_status
+    
+    - check_data_snapshot_done:
+        switch:
+          - condition: ${data_snapshot_status.body.status != "DONE"}
+            next: sleep_then_check_data_snapshot
+        next: stop_primary_vm
+    
+    - sleep_then_check_data_snapshot:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_data_snapshot
+    
+    # Step 3: Stop primary VM
+    - stop_primary_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/stop"}
+          auth:
+            type: OAuth2
+        result: stop_operation
+    
+    - wait_for_stop:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + stop_operation.body.name}
+          auth:
+            type: OAuth2
+        result: stop_status
+    
+    - check_stop_done:
+        switch:
+          - condition: ${stop_status.body.status != "DONE"}
+            next: sleep_then_check_stop
+        next: detach_regional_disk
+    
+    - sleep_then_check_stop:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_stop
+    
+    # Step 4: Detach regional disk from primary VM
+    - detach_regional_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/detachDisk"}
+          auth:
+            type: OAuth2
+          body:
+            deviceName: "app-data-disk"
+        result: detach_operation
+    
+    - wait_for_detach:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + detach_operation.body.name}
+          auth:
+            type: OAuth2
+        result: detach_status
+    
+    - check_detach_done:
+        switch:
+          - condition: ${detach_status.body.status != "DONE"}
+            next: sleep_then_check_detach
+        next: get_latest_boot_snapshot
+    
+    - sleep_then_check_detach:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_detach
+    
+    # Step 5: Get latest boot disk snapshot
+    - get_latest_boot_snapshot:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots?filter=sourceDisk%3Dapp-primary-boot-disk&orderBy=creationTimestamp%20desc&maxResults=1"}
+          auth:
+            type: OAuth2
+        result: latest_snapshot_response
+    
+    - extract_snapshot_name:
+        assign:
+          - latest_snapshot_name: ${latest_snapshot_response.body.items[0].name}
+    
+    # Step 6: Delete failover disk if it exists
+    - check_failover_disk:
+        try:
+          call: http.get
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-disk-failover"}
+            auth:
+              type: OAuth2
+          result: failover_disk_response
+        except:
+          as: e
+          steps:
+            - handle_disk_not_found:
+                switch:
+                  - condition: ${e.code == 404}
+                    next: create_failover_disk
+                next: raise_error
+            - raise_error:
+                raise: ${e}
+    
+    - delete_failover_disk:
+        call: http.delete
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-disk-failover"}
+          auth:
+            type: OAuth2
+        result: delete_disk_operation
+    
+    - wait_for_delete_disk:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + delete_disk_operation.body.name}
+          auth:
+            type: OAuth2
+        result: delete_disk_status
+    
+    - check_delete_disk_done:
+        switch:
+          - condition: ${delete_disk_status.body.status != "DONE"}
+            next: sleep_then_check_delete_disk
+        next: create_failover_disk
+    
+    - sleep_then_check_delete_disk:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_delete_disk
+    
+    # Step 7: Create new disk from snapshot
+    - create_failover_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks"}
+          auth:
+            type: OAuth2
+          body:
+            name: "app-standby-disk-failover"
+            sourceSnapshot: ${"projects/" + project_id + "/global/snapshots/" + latest_snapshot_name}
+            type: "pd-balanced"
+            guestOsFeatures:
+              - type: "UEFI_COMPATIBLE"
+        result: create_disk_operation
+    
+    - wait_for_create_disk:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + create_disk_operation.body.name}
+          auth:
+            type: OAuth2
+        result: create_disk_status
+    
+    - check_create_disk_done:
+        switch:
+          - condition: ${create_disk_status.body.status != "DONE"}
+            next: sleep_then_check_create_disk
+        next: stop_standby_vm
+    
+    - sleep_then_check_create_disk:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_create_disk
+    
+    # Step 8: Stop standby VM if running
+    - stop_standby_vm:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/stop"}
+            auth:
+              type: OAuth2
+          result: stop_standby_operation
+        except:
+          as: e
+          steps:
+            - log_stop_error:
+                call: sys.log
+                args:
+                  text: 'Failed to stop standby VM'
+                  severity: "WARNING"
+    
+    - check_stop_standby_result:
+        switch:
+          - condition: ${stop_standby_operation != null}
+            next: wait_for_standby_stop
+        next: detach_standby_boot_disk
+    
+    - wait_for_standby_stop:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + stop_standby_operation.body.name}
+          auth:
+            type: OAuth2
+        result: stop_standby_status
+    
+    - check_standby_stop_done:
+        switch:
+          - condition: ${stop_standby_status.body.status != "DONE"}
+            next: sleep_then_check_standby_stop
+        next: detach_standby_boot_disk
+    
+    - sleep_then_check_standby_stop:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_standby_stop
+    
+    # Step 9: Detach current boot disk from standby VM
+    - detach_standby_boot_disk:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
+            auth:
+              type: OAuth2
+            body:
+              deviceName: "boot"
+          result: detach_boot_operation
+        except:
+          as: e
+          steps:
+            - log_detach_error:
+                call: sys.log
+                args:
+                  text: 'Failed to detach boot disk'
+                  severity: "WARNING"
+    
+    - check_detach_boot_result:
+        switch:
+          - condition: ${detach_boot_operation != null}
+            next: wait_for_boot_detach
+        next: attach_regional_disk
+    
+    - wait_for_boot_detach:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + detach_boot_operation.body.name}
+          auth:
+            type: OAuth2
+        result: detach_boot_status
+    
+    - check_boot_detach_done:
+        switch:
+          - condition: ${detach_boot_status.body.status != "DONE"}
+            next: sleep_then_check_boot_detach
+        next: attach_regional_disk
+    
+    - sleep_then_check_boot_detach:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_boot_detach
+    
+    # Step 10: Attach regional disk to standby VM
+    - attach_regional_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+          auth:
+            type: OAuth2
+          body:
+            source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+            deviceName: "app-data-disk"
+            mode: "READ_WRITE"
+        result: attach_regional_operation
+    
+    - wait_for_regional_attach:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + attach_regional_operation.body.name}
+          auth:
+            type: OAuth2
+        result: attach_regional_status
+    
+    - check_regional_attach_done:
+        switch:
+          - condition: ${attach_regional_status.body.status != "DONE"}
+            next: sleep_then_check_regional_attach
+        next: attach_failover_disk
+    
+    - sleep_then_check_regional_attach:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_regional_attach
+    
+    # Step 11: Attach failover disk to standby VM as boot disk
+    - attach_failover_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+          auth:
+            type: OAuth2
+          body:
+            source: ${"projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-disk-failover"}
+            deviceName: "boot-disk"
+            boot: true
+        result: attach_boot_operation
+    
+    - wait_for_boot_attach:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + attach_boot_operation.body.name}
+          auth:
+            type: OAuth2
+        result: attach_boot_status
+    
+    - check_boot_attach_done:
+        switch:
+          - condition: ${attach_boot_status.body.status != "DONE"}
+            next: sleep_then_check_boot_attach
+        next: start_standby_vm
+    
+    - sleep_then_check_boot_attach:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_boot_attach
+    
+    # Step 12: Start standby VM
+    - start_standby_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/start"}
+          auth:
+            type: OAuth2
+        result: start_operation
+    
+    - wait_for_start:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + start_operation.body.name}
+          auth:
+            type: OAuth2
+        result: start_status
+    
+    - check_start_done:
+        switch:
+          - condition: ${start_status.body.status != "DONE"}
+            next: sleep_then_check_start
+        next: wait_for_initialization
+    
+    - sleep_then_check_start:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_start
+    
+    # Step 13: Wait for application to initialize
+    - wait_for_initialization:
+        call: sys.sleep
+        args:
+          seconds: 30
+    
+    # Step 14: Add standby VM to instance group
+    - add_to_instance_group:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instanceGroups/app-standby-group/addInstances"}
+          auth:
+            type: OAuth2
+          body:
+            instances:
+              - instance: ${"projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
+        result: add_ig_operation
+    
+    - wait_for_add_ig:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + add_ig_operation.body.name}
+          auth:
+            type: OAuth2
+        result: add_ig_status
+    
+    - check_add_ig_done:
+        switch:
+          - condition: ${add_ig_status.body.status != "DONE"}
+            next: sleep_then_check_add_ig
+        next: calculate_rto
+    
+    - sleep_then_check_add_ig:
+        call: sys.sleep
+        args:
+          seconds: 5
+        next: wait_for_add_ig
+    
+    # Step 15: Calculate RTO and return results
+    - calculate_rto:
+        assign:
+          - end_time: ${sys.now()}
+          - rto_seconds: ${(end_time - start_time) / 1000}
+    
+    - write_metric:
+        call: http.post
+        args:
+          url: ${"https://monitoring.googleapis.com/v3/projects/" + project_id + "/timeSeries"}
+          auth:
+            type: OAuth2
+          body:
+            timeSeries:
+              - metric:
+                  type: "custom.googleapis.com/dr/recovery_time_objective"
+                  labels:
+                    operation: "failover"
+                resource:
+                  type: "global"
+                  labels:
+                    project_id: ${project_id}
+                points:
+                  - interval:
+                      endTime: ${sys.now()}
+                    value:
+                      doubleValue: ${rto_seconds}
+    
+    - return_result:
+        return:
+          status: "success"
+          rto_seconds: ${rto_seconds}
+          message: "Failover completed successfully"
