@@ -24,13 +24,24 @@ execute_workflow() {
   status "Executing workflow: $workflow_name"
   
   # Execute the workflow
-  EXECUTION_ID=$(gcloud workflows run $workflow_name \
+  EXECUTION_FULL_NAME=$(gcloud workflows run $workflow_name \
     --data="$arguments" \
     --location=$region \
-    --format="value(execution.name)")
+    --format="value(name)")
   
   # Extract just the execution ID from the full name
-  EXECUTION_ID=$(echo $EXECUTION_ID | sed 's|.*/||')
+  EXECUTION_ID=$(echo $EXECUTION_FULL_NAME | sed 's|.*/||')
+  
+  # Debug output
+  echo "Full execution name: $EXECUTION_FULL_NAME"
+  echo "Execution ID: $EXECUTION_ID"
+  
+  # Check if execution ID was extracted properly
+  if [[ -z "$EXECUTION_ID" ]]; then
+    echo "ERROR: Failed to extract execution ID"
+    echo "Full response: $EXECUTION_FULL_NAME"
+    return 1
+  fi
   
   # Wait for workflow completion
   status "Waiting for workflow completion"
@@ -166,12 +177,16 @@ case "$1" in
     ;;
     
   failover)
-    # Ask if snapshot should be forced
-    read -p "Force creation of new snapshots? (y/n): " force_snapshot
-    if [[ "$force_snapshot" == "y" ]]; then
-      execute_workflow "dr-failover-workflow" '{"force_snapshot": true}'
-    else
+    # Check if snapshots exist
+    echo "Checking for existing snapshots..."
+    BOOT_SNAPSHOTS=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" --limit=1 --format="value(name)" 2>/dev/null)
+    
+    if [[ -n "$BOOT_SNAPSHOTS" ]]; then
+      echo "✓ Found existing boot disk snapshots - reusing for fast demo"
       execute_workflow "dr-failover-workflow" '{"force_snapshot": false}'
+    else
+      echo "⚠ No existing snapshots found - creating new ones (this may take longer)"
+      execute_workflow "dr-failover-workflow" '{"force_snapshot": true}'
     fi
     ;;
     

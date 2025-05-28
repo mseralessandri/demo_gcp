@@ -52,7 +52,7 @@ verify_app() {
   local RETRY_INTERVAL=10
   local RETRIES=0
   
-  status "Verifying application at $PROTOCOL://$IP:$PORT/web"
+  echo "Verifying application at $PROTOCOL://$IP:$PORT/web"
   
   while [ $RETRIES -lt $MAX_RETRIES ]; do
     curl -s -k "$PROTOCOL://$IP:$PORT/web" > /dev/null
@@ -70,38 +70,53 @@ verify_app() {
   return 1
 }
 
-# Function to verify application through load balancer
-verify_app_lb() {
-  status "Verifying application through load balancer"
+# Function to verify application with three-tier strategy
+verify_app_three_tier() {
+  local VM_IP=$1
+  local VM_ZONE=$2
+  
+  status "Three-tier verification: HTTPS LB -> HTTP LB -> Direct VM access"
   
   # Get load balancer IPs
-  LB_HTTP_IP=$(terraform output -raw load_balancer_http_ip 2>/dev/null)
-  LB_HTTPS_IP=$(terraform output -raw load_balancer_https_ip 2>/dev/null)
+  LB_HTTP_IP=$(cd ../terraform && terraform output -raw load_balancer_http_ip 2>/dev/null)
+  LB_HTTPS_IP=$(cd ../terraform && terraform output -raw load_balancer_https_ip 2>/dev/null)
   
-  if [ -z "$LB_HTTP_IP" ] && [ -z "$LB_HTTPS_IP" ]; then
-    echo "ERROR: Could not get load balancer IP addresses from Terraform outputs"
-    return 1
-  fi
-  
-  # Try HTTPS first
+  # Tier 1: Try HTTPS load balancer first
   if [ ! -z "$LB_HTTPS_IP" ]; then
-    echo "Verifying HTTPS endpoint..."
-    verify_app "$LB_HTTPS_IP" "443" "https"
-    if [ $? -eq 0 ]; then
+    echo "Tier 1: Trying HTTPS load balancer..."
+    if verify_app "$LB_HTTPS_IP" "443" "https"; then
+      echo "SUCCESS: HTTPS load balancer verification successful"
       return 0
     fi
+    echo "HTTPS load balancer failed, trying HTTP load balancer..."
   fi
   
-  # Try HTTP if HTTPS failed or is not available
+  # Tier 2: Try HTTP load balancer if HTTPS failed
   if [ ! -z "$LB_HTTP_IP" ]; then
-    echo "Verifying HTTP endpoint..."
-    verify_app "$LB_HTTP_IP" "80" "http"
-    if [ $? -eq 0 ]; then
+    echo "Tier 2: Trying HTTP load balancer..."
+    if verify_app "$LB_HTTP_IP" "80" "http"; then
+      echo "SUCCESS: HTTP load balancer verification successful"
+      return 0
+    fi
+    echo "HTTP load balancer failed, trying direct VM access..."
+  fi
+  
+  # Tier 3: Try direct VM access if both load balancers failed
+  if [ ! -z "$VM_IP" ]; then
+    echo "Tier 3: Trying direct VM access..."
+    # Try HTTPS first, then HTTP on direct VM
+    if verify_app "$VM_IP" "8443" "https"; then
+      echo "SUCCESS: Direct VM HTTPS verification successful"
+      return 0
+    fi
+    echo "Direct VM HTTPS failed, trying HTTP..."
+    if verify_app "$VM_IP" "8080" "http"; then
+      echo "SUCCESS: Direct VM HTTP verification successful"
       return 0
     fi
   fi
   
-  echo "ERROR: Application is not responding through load balancer"
+  echo "ERROR: All verification tiers failed - application is not responding"
   return 1
 }
 
@@ -130,7 +145,7 @@ write_custom_metric() {
 
 # Function to get database credentials from terraform.tfvars
 get_db_credentials() {
-  local tfvars_file="terraform.tfvars"
+  local tfvars_file="../terraform/terraform.tfvars"
   
   # Extract database credentials from terraform.tfvars
   DB_NAME=$(grep -E "^db_name\s*=" "$tfvars_file" | cut -d "=" -f2 | tr -d ' "')
@@ -156,7 +171,7 @@ function show_usage {
   echo "  status        - Show current status of primary and standby resources"
   echo "  failover      - Simulate failure and perform failover to standby zone"
   echo "  failback      - Perform failback to primary zone"
-  echo "  backup        - Create on-demand backups of VM disk and database"
+  echo "  snapshot      - Create on-demand snapshots of VM disk and database"
   echo "  restore-disk  - Demonstrate disk restore from snapshot"
   echo "  restore-db    - Demonstrate database point-in-time recovery"
   echo "  test-all      - Run a complete DR demo (failover + failback)"
@@ -252,24 +267,6 @@ case "$1" in
       status "Found existing snapshots for primary boot disk"
     fi
     
-    # 2.1 Also create a snapshot of the regional data disk if needed
-    DATA_SNAPSHOT_COUNT=$(gcloud compute snapshots list --filter="sourceDisk:app-regional-disk" --format="value(name)" | wc -l)
-    
-    if [ "$DATA_SNAPSHOT_COUNT" -eq 0 ]; then
-      status "No snapshots found for regional data disk, creating one now"
-      DATA_SNAPSHOT_NAME="manual-data-snapshot-$(date +%Y%m%d%H%M%S)"
-      
-      gcloud compute snapshots create $DATA_SNAPSHOT_NAME \
-        --source-disk=app-regional-disk \
-        --source-disk-region=us-central1 \
-        --description="Automatic snapshot of data disk for DR testing"
-      
-      status "Waiting for data disk snapshot to complete..."
-      sleep 30  # Give some time for the snapshot to complete
-    else
-      status "Found existing snapshots for regional data disk"
-    fi
-    
     # 3. Simulate primary zone failure by stopping the primary VM
     status "Simulating primary zone failure"
     gcloud compute instances stop app-web-server-dr-primary --zone=us-central1-a --quiet
@@ -290,21 +287,37 @@ case "$1" in
     LATEST_BOOT_SNAPSHOT=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" --sort-by=~creationTimestamp --limit=1 --format="value(name)")
     echo "Using boot disk snapshot: $LATEST_BOOT_SNAPSHOT"
     
-    # Delete the failover disk if it already exists from a previous test
-    gcloud compute disks delete app-standby-disk-failover --zone=us-central1-c --quiet 2>/dev/null || true
+    # Check if failover disk already exists and handle it properly
+    if gcloud compute disks describe app-standby-disk-failover --zone=us-central1-c >/dev/null 2>&1; then
+      echo "Failover disk already exists, checking if it's attached..."
+      
+      # Check if the disk is attached to the standby VM
+      ATTACHED_DISKS=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(disks[].source)" 2>/dev/null || echo "")
+      if [[ $ATTACHED_DISKS == *"app-standby-disk-failover"* ]]; then
+        echo "Failover disk is attached to standby VM, detaching it first..."
+        gcloud compute instances detach-disk app-web-server-dr-standby \
+          --disk=app-standby-disk-failover \
+          --zone=us-central1-c 2>/dev/null || true
+        echo "Waiting for disk detachment..."
+        sleep 10
+      fi
+      
+      echo "Deleting existing failover disk..."
+      gcloud compute disks delete app-standby-disk-failover --zone=us-central1-c --quiet
+      echo "Waiting for disk deletion to complete..."
+      sleep 15
+    fi
     
     # Get the UEFI settings of the boot disk
     BOOT_DISK_UEFI=$(gcloud compute disks describe app-standby-boot-disk --zone=us-central1-c --format="json" | grep -i "uefi")
     
     # Create the new disk with matching UEFI settings
     if [[ -n "$BOOT_DISK_UEFI" ]]; then
-  #    echo "Boot disk has UEFI enabled, creating disk with UEFI support"
       gcloud compute disks create app-standby-disk-failover \
         --source-snapshot=$LATEST_BOOT_SNAPSHOT \
         --zone=us-central1-c \
         --guest-os-features=UEFI_COMPATIBLE
     else
-  #    echo "Boot disk has standard BIOS, creating disk without UEFI support"
       gcloud compute disks create app-standby-disk-failover \
         --source-snapshot=$LATEST_BOOT_SNAPSHOT \
         --zone=us-central1-c
@@ -390,19 +403,21 @@ case "$1" in
     status "Waiting for application to initialize"
     sleep 30
     
-    # 9. Add the standby VM to the DR instance group
+    # 9. Add the standby VM to the DR instance group (if not already added)
     status "Adding standby VM to instance group"
-    gcloud compute instance-groups unmanaged add-instances app-standby-group \
-      --zone=us-central1-c \
-      --instances=app-web-server-dr-standby
+    CURRENT_INSTANCES=$(gcloud compute instance-groups unmanaged list-instances app-standby-group --zone=us-central1-c --format="value(instance)" 2>/dev/null || echo "")
+    if [[ $CURRENT_INSTANCES != *"app-web-server-dr-standby"* ]]; then
+      echo "Adding standby VM to instance group..."
+      gcloud compute instance-groups unmanaged add-instances app-standby-group \
+        --zone=us-central1-c \
+        --instances=app-web-server-dr-standby
+    else
+      echo "Standby VM is already in the instance group"
+    fi
     
-    # 10. Verify application is responding through load balancer
-    status "Verifying application through load balancer"
-    verify_app_lb
-    
-    # Also verify direct VM access for debugging
+    # 10. Three-tier verification
     DR_IP=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
-    verify_app "$DR_IP" "8080" "http"
+    verify_app_three_tier "$DR_IP" "us-central1-c"
     
     # 11. Calculate RTO
     end_time=$(date +%s)
@@ -477,13 +492,9 @@ case "$1" in
     status "Waiting for application to initialize"
     sleep 30
     
-    # 8. Verify application is responding through load balancer
-    status "Verifying application through load balancer"
-    verify_app_lb
-    
-    # Also verify direct VM access for debugging
+    # 8. Three-tier verification
     PRIMARY_IP=$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
-    verify_app "$PRIMARY_IP" "8080" "http"
+    verify_app_three_tier "$PRIMARY_IP" "us-central1-a"
     
     # 9. Remove the standby VM from the DR instance group
     status "Removing standby VM from instance group"
@@ -491,23 +502,23 @@ case "$1" in
       --zone=us-central1-c \
       --instances=app-web-server-dr-standby 2>/dev/null || true
     
-    # 8. Calculate RTO
+    # 10. Calculate RTO
     end_time=$(date +%s)
     rto=$((end_time - start_time))
     echo "Failback completed in $rto seconds"
     
-    # 9. Write custom metrics
+    # 11. Write custom metrics
     write_custom_metric "recovery_time" "${rto}" "failback"
     write_custom_metric "success_rate" "1.0" "failback"
     
-    # 10. Check metrics after failback
+    # 12. Check metrics after failback
     #check_metrics
     
     status "Failback test completed"
     ;;
 
-  backup)
-    status "CREATING ON-DEMAND BACKUPS"
+  snapshot)
+    status "CREATING ON-DEMAND SNAPSHOTS"
     
     # 1. Creating boot disk snapshot
     BOOT_SNAPSHOT_NAME="demo-boot-snapshot-$(date +%Y%m%d%H%M%S)"
@@ -518,42 +529,29 @@ case "$1" in
       --source-disk-zone=us-central1-a \
       --description="Demo boot disk snapshot created on $(date)"
     
-    # 2. Creating data disk snapshot
-    DATA_SNAPSHOT_NAME="demo-data-snapshot-$(date +%Y%m%d%H%M%S)"
-    status "Creating data disk snapshot: $DATA_SNAPSHOT_NAME"
-    
-    gcloud compute snapshots create $DATA_SNAPSHOT_NAME \
-      --source-disk=app-regional-disk \
-      --source-disk-region=us-central1 \
-      --description="Demo data disk snapshot created on $(date)"
-    
-    # 3. Creating database backup
+    # 2. Creating database backup
     status "Creating database backup"
     BACKUP_ID="demo-backup-$(date +%Y%m%d%H%M%S)"
     gcloud sql backups create --instance=app-db-instance-dr \
       --description="Demo backup created on $(date)"
     
-    # 4. Get database credentials and insert test data for backup verification
+    # 3. Get database credentials and insert test data for snapshot verification
     DB_IP=$(gcloud sql instances describe app-db-instance-dr --format="value(ipAddresses[0].ipAddress)")
     get_db_credentials
     
-    status "Inserting test data for backup verification"
+    status "Inserting test data for snapshot verification"
     mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
--- Insert a backup verification record
-INSERT INTO records (data) VALUES ('Backup verification record - $(date)');
+-- Insert a snapshot verification record
+INSERT INTO records (data) VALUES ('Snapshot verification record - $(date)');
 
 -- Show the current data in the records table
 SELECT * FROM records;
 EOF
     
-    # 5. Verify backups
-    status "Verifying backups"
+    # 4. Verify snapshots
+    status "Verifying snapshots"
     echo "Boot disk snapshot:"
     gcloud compute snapshots list --filter="name:$BOOT_SNAPSHOT_NAME" \
-      --format="table(name,diskSizeGb,creationTimestamp)"
-    
-    echo "Data disk snapshot:"
-    gcloud compute snapshots list --filter="name:$DATA_SNAPSHOT_NAME" \
       --format="table(name,diskSizeGb,creationTimestamp)"
     
     echo "Database backups:"
@@ -561,7 +559,7 @@ EOF
       --limit=1 \
       --format="table(id,windowStartTime,status)"
     
-    status "Backup completed successfully"
+    status "Snapshot completed successfully"
     ;;
 
   restore-disk)
@@ -675,10 +673,10 @@ EOF
     # 8. Verify the data in the clone
     CLONE_IP=$(gcloud sql instances describe pitr-demo-instance --format="value(ipAddresses[0].ipAddress)")
     status "Verifying data in the clone (should only have initial data)"
-    mysql -h $CLONE_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
+    mysql -h $CLONE_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOSQL
 -- Check that only the initial data is present
 SELECT * FROM records;
-EOF
+EOSQL
     
     # 9. Provide cleanup instructions
     echo ""
@@ -725,14 +723,3 @@ EOF
     exit 1
     ;;
 esac
-
-
-# Get the load balancer IPs
-# terraform output load_balancer_http_ip
-# terraform output load_balancer_https_ip
-
-# Test HTTP access
-#curl http://<load_balancer_http_ip>/web
-
-# Test HTTPS access (with -k to ignore certificate warnings)
-#curl -k https://<load_balancer_https_ip>/web
