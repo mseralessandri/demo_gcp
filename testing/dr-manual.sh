@@ -681,8 +681,65 @@ EOF
     
     # 3. Insert initial data into the existing records table
     status "Inserting initial data into the records table"
-    mysql -h $DB_IP -u $DB_USER
-    echo "gcloud sql instances delete pitr-demo-instance --quiet"
+    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
+-- Insert initial data that should be preserved after recovery
+INSERT INTO records (data) VALUES ('Initial data - $(date)');
+SELECT 'Initial data inserted' as status;
+SELECT * FROM records ORDER BY id DESC LIMIT 5;
+EOF
+    
+    # 4. Set recovery point
+    echo ""
+    echo "Initial data has been inserted. This is your recovery point."
+    read -p "Press Enter to continue and add data that will be lost after recovery..." dummy
+    RECOVERY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
+    echo "Recovery point set at: $RECOVERY_TIME"
+    
+    # 5. Insert data that will be lost after recovery
+    status "Inserting data that will be lost after recovery"
+    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
+-- Insert data that should be lost after recovery
+INSERT INTO records (data) VALUES ('Data to be lost - $(date)');
+INSERT INTO records (data) VALUES ('More data to be lost - $(date)');
+SELECT 'Data to be lost inserted' as status;
+SELECT * FROM records ORDER BY id DESC LIMIT 5;
+EOF
+    
+    # 6. Create database clone at recovery point
+    status "Creating database clone at recovery point"
+    CLONE_INSTANCE_NAME="pitr-demo-instance-$(date +%Y%m%d%H%M%S)"
+    
+    gcloud sql instances clone app-db-instance-dr $CLONE_INSTANCE_NAME \
+      --point-in-time="$RECOVERY_TIME" \
+      --async
+    
+    echo "Waiting for clone operation to complete..."
+    sleep 60
+    
+    # 7. Wait for clone to be ready
+    while [[ "$(gcloud sql instances describe $CLONE_INSTANCE_NAME --format='value(state)' 2>/dev/null)" != "RUNNABLE" ]]; do
+      echo "Waiting for clone to be ready..."
+      sleep 30
+    done
+    
+    # 8. Compare data between original and cloned database
+    status "Comparing data between original and cloned database"
+    
+    CLONE_IP=$(gcloud sql instances describe $CLONE_INSTANCE_NAME --format="value(ipAddresses[0].ipAddress)")
+    
+    echo "Data in original database (should include data added after recovery point):"
+    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME -e "SELECT * FROM records ORDER BY id DESC LIMIT 10;"
+    
+    echo ""
+    echo "Data in cloned database (should NOT include data added after recovery point):"
+    mysql -h $CLONE_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME -e "SELECT * FROM records ORDER BY id DESC LIMIT 10;"
+    
+    # 9. Cleanup
+    echo ""
+    echo "Point-in-time recovery demo completed!"
+    echo ""
+    echo "To clean up the demo clone instance, run:"
+    echo "gcloud sql instances delete $CLONE_INSTANCE_NAME --quiet"
     ;;
 
   test-all)
