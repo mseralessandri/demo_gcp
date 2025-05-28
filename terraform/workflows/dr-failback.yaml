@@ -10,20 +10,38 @@ main:
     
     # Step 1: Stop standby VM
     - stop_standby_vm:
-        call: http.post
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/stop"}
-          auth:
-            type: OAuth2
-        result: stop_standby_operation
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/stop"}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: stop_standby_operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 10
+            multiplier: 2
     
     - wait_for_standby_stop:
-        call: http.get
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + stop_standby_operation.body.name}
-          auth:
-            type: OAuth2
-        result: stop_standby_status
+        try:
+          call: http.get
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + stop_standby_operation.body.name}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: stop_standby_status
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 1
+            max_delay: 5
+            multiplier: 2
     
     - check_standby_stop_done:
         switch:
@@ -39,22 +57,40 @@ main:
     
     # Step 2: Detach regional disk from standby VM
     - detach_regional_disk:
-        call: http.post
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
-          auth:
-            type: OAuth2
-          body:
-            deviceName: "app-data-disk"
-        result: detach_operation
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
+            auth:
+              type: OAuth2
+            timeout: 30
+            body:
+              deviceName: "app-data-disk"
+          result: detach_operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 10
+            multiplier: 2
     
     - wait_for_detach:
-        call: http.get
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + detach_operation.body.name}
-          auth:
-            type: OAuth2
-        result: detach_status
+        try:
+          call: http.get
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + detach_operation.body.name}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: detach_status
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 1
+            max_delay: 5
+            multiplier: 2
     
     - check_detach_done:
         switch:
@@ -70,20 +106,38 @@ main:
     
     # Step 3: Start primary VM
     - start_primary_vm:
-        call: http.post
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/start"}
-          auth:
-            type: OAuth2
-        result: start_operation
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/start"}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: start_operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 10
+            multiplier: 2
     
     - wait_for_start:
-        call: http.get
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + start_operation.body.name}
-          auth:
-            type: OAuth2
-        result: start_status
+        try:
+          call: http.get
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + start_operation.body.name}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: start_status
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 1
+            max_delay: 5
+            multiplier: 2
     
     - check_start_done:
         switch:
@@ -99,24 +153,42 @@ main:
     
     # Step 4: Attach regional disk to primary VM
     - attach_regional_disk:
-        call: http.post
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/attachDisk"}
-          auth:
-            type: OAuth2
-          body:
-            source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
-            deviceName: "app-data-disk"
-            mode: "READ_WRITE"
-        result: attach_regional_operation
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/attachDisk"}
+            auth:
+              type: OAuth2
+            timeout: 30
+            body:
+              source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+              deviceName: "app-data-disk"
+              mode: "READ_WRITE"
+          result: attach_regional_operation
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 10
+            multiplier: 2
     
     - wait_for_regional_attach:
-        call: http.get
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + attach_regional_operation.body.name}
-          auth:
-            type: OAuth2
-        result: attach_regional_status
+        try:
+          call: http.get
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + attach_regional_operation.body.name}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: attach_regional_status
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 1
+            max_delay: 5
+            multiplier: 2
     
     - check_regional_attach_done:
         switch:
@@ -144,6 +216,7 @@ main:
             url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instanceGroups/app-standby-group/removeInstances"}
             auth:
               type: OAuth2
+            timeout: 30
             body:
               instances:
                 - instance: ${"projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
@@ -156,6 +229,13 @@ main:
                 args:
                   text: 'Failed to remove from instance group'
                   severity: "WARNING"
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 10
+            multiplier: 2
     
     - check_remove_ig_result:
         switch:
@@ -164,12 +244,21 @@ main:
         next: calculate_rto
     
     - wait_for_remove_ig:
-        call: http.get
-        args:
-          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + remove_ig_operation.body.name}
-          auth:
-            type: OAuth2
-        result: remove_ig_status
+        try:
+          call: http.get
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + remove_ig_operation.body.name}
+            auth:
+              type: OAuth2
+            timeout: 30
+          result: remove_ig_status
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 1
+            max_delay: 5
+            multiplier: 2
     
     - check_remove_ig_done:
         switch:
@@ -190,26 +279,43 @@ main:
           - rto_seconds: ${(end_time - start_time) / 1000}
     
     - write_metric:
-        call: http.post
-        args:
-          url: ${"https://monitoring.googleapis.com/v3/projects/" + project_id + "/timeSeries"}
-          auth:
-            type: OAuth2
-          body:
-            timeSeries:
-              - metric:
-                  type: "custom.googleapis.com/dr/recovery_time_objective"
-                  labels:
-                    operation: "failback"
-                resource:
-                  type: "global"
-                  labels:
-                    project_id: ${project_id}
-                points:
-                  - interval:
-                      endTime: ${sys.now()}
-                    value:
-                      doubleValue: ${rto_seconds}
+        try:
+          call: http.post
+          args:
+            url: ${"https://monitoring.googleapis.com/v3/projects/" + project_id + "/timeSeries"}
+            auth:
+              type: OAuth2
+            timeout: 30
+            body:
+              timeSeries:
+                - metric:
+                    type: "custom.googleapis.com/dr/recovery_time_objective"
+                    labels:
+                      operation: "failback"
+                  resource:
+                    type: "global"
+                    labels:
+                      project_id: ${project_id}
+                  points:
+                    - interval:
+                        endTime: ${sys.now()}
+                      value:
+                        doubleValue: ${rto_seconds}
+        except:
+          as: e
+          steps:
+            - log_metric_error:
+                call: sys.log
+                args:
+                  text: 'Failed to write metric'
+                  severity: "WARNING"
+        retry:
+          predicate: ${http.default_retry_predicate}
+          max_retries: 3
+          backoff:
+            initial_delay: 2
+            max_delay: 10
+            multiplier: 2
     
     - return_result:
         return:

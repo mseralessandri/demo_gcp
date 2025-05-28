@@ -44,6 +44,14 @@ resource "google_compute_region_disk" "regional_disk" {
   size                      = var.disk_size_gb
   replica_zones             = [var.primary_zone, var.standby_zone]
   physical_block_size_bytes = 4096
+  
+  lifecycle {
+    ignore_changes = [
+      # Ignore changes that don't require disk recreation
+      physical_block_size_bytes,
+      labels
+    ]
+  }
 }
 
 # Standby boot disk
@@ -54,8 +62,13 @@ resource "google_compute_disk" "standby_boot_disk" {
   size  = var.boot_disk_size_gb
   
   lifecycle {
-    create_before_destroy = true
-    ignore_changes = [name]
+    ignore_changes = [
+      # Ignore image changes to prevent unnecessary recreation
+      # This allows terraform destroy to work while preventing "already exists" errors
+      image,
+      labels,
+      name
+    ]
   }
 }
 
@@ -67,8 +80,13 @@ resource "google_compute_disk" "primary_boot_disk" {
   size  = var.boot_disk_size_gb
   
   lifecycle {
-    create_before_destroy = true
-    ignore_changes = [name]
+    ignore_changes = [
+      # Ignore image changes to prevent unnecessary recreation
+      # This allows terraform destroy to work while preventing "already exists" errors
+      image,
+      labels,
+      name
+    ]
   }
 }
 
@@ -108,6 +126,14 @@ resource "google_compute_instance" "primary_vm" {
     db_host = google_sql_database_instance.db_instance.private_ip_address
     GO_VERSION = var.go_version
   })
+  
+  lifecycle {
+    ignore_changes = [
+      # Ignore metadata changes that don't require VM recreation
+      metadata_startup_script,
+      labels
+    ]
+  }
 }
 
 # Standby VM in the standby zone (stopped by default)
@@ -150,8 +176,17 @@ resource "google_compute_instance" "standby_vm" {
     command = "gcloud compute instances stop ${self.name} --zone=${self.zone} --quiet"
   }
   
-  # Prevent Terraform from trying to start the VM on subsequent applies
+  # Prevent Terraform from trying to recreate the VM on subsequent applies
   lifecycle {
-    ignore_changes = [desired_status]
+    ignore_changes = [
+      # Ignore VM state changes and metadata updates to prevent recreation
+      desired_status,
+      metadata_startup_script,
+      labels,
+      boot_disk,
+      # Ignore boot disk changes to prevent VM recreation when disk source changes
+      # This is critical for DR scenarios where boot disk may be swapped
+      metadata
+    ]
   }
 }

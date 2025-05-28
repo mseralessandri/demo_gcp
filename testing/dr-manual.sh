@@ -13,6 +13,73 @@ status() {
   echo "===== $1 ====="
 }
 
+# Function to safely handle disk cleanup
+safe_disk_cleanup() {
+  local disk_name=$1
+  local zone=$2
+  local vm_name=$3
+  
+  echo "Safely cleaning up disk: $disk_name"
+  
+  # First, stop the VM if it's running
+  VM_STATUS=$(gcloud compute instances describe $vm_name --zone=$zone --format="value(status)" 2>/dev/null || echo "NOT_FOUND")
+  if [[ "$VM_STATUS" == "RUNNING" ]]; then
+    echo "Stopping VM $vm_name to safely detach disks..."
+    gcloud compute instances stop $vm_name --zone=$zone --quiet
+    
+    # Wait for VM to stop
+    while [[ "$(gcloud compute instances describe $vm_name --zone=$zone --format='value(status)' 2>/dev/null)" == "RUNNING" ]]; do
+      echo "Waiting for VM to stop..."
+      sleep 5
+    done
+  fi
+  
+  # Check if disk exists
+  if gcloud compute disks describe $disk_name --zone=$zone >/dev/null 2>&1; then
+    echo "Disk $disk_name exists, checking if it's attached..."
+    
+    # Get all attached disks for the VM
+    ATTACHED_DISKS=$(gcloud compute instances describe $vm_name --zone=$zone --format="value(disks[].source)" 2>/dev/null || echo "")
+    
+    # If the disk is attached, detach it
+    if [[ $ATTACHED_DISKS == *"$disk_name"* ]]; then
+      echo "Detaching disk $disk_name from VM $vm_name..."
+      gcloud compute instances detach-disk $vm_name \
+        --disk=$disk_name \
+        --zone=$zone 2>/dev/null || true
+      
+      # Wait for detachment to complete
+      echo "Waiting for disk detachment to complete..."
+      sleep 15
+      
+      # Verify detachment
+      ATTACHED_DISKS=$(gcloud compute instances describe $vm_name --zone=$zone --format="value(disks[].source)" 2>/dev/null || echo "")
+      if [[ $ATTACHED_DISKS == *"$disk_name"* ]]; then
+        echo "Warning: Disk still appears to be attached. Waiting longer..."
+        sleep 30
+      fi
+    fi
+    
+    # Now try to delete the disk
+    echo "Deleting disk $disk_name..."
+    gcloud compute disks delete $disk_name --zone=$zone --quiet
+    echo "Waiting for disk deletion to complete..."
+    sleep 20
+    
+    # Verify deletion
+    if gcloud compute disks describe $disk_name --zone=$zone >/dev/null 2>&1; then
+      echo "Warning: Disk still exists. This may cause issues with disk creation."
+      return 1
+    else
+      echo "Disk $disk_name successfully deleted."
+      return 0
+    fi
+  else
+    echo "Disk $disk_name does not exist, no cleanup needed."
+    return 0
+  fi
+}
+
 # Function to check monitoring metrics
 check_metrics() {
   status "Checking monitoring metrics"
@@ -287,31 +354,15 @@ case "$1" in
     LATEST_BOOT_SNAPSHOT=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" --sort-by=~creationTimestamp --limit=1 --format="value(name)")
     echo "Using boot disk snapshot: $LATEST_BOOT_SNAPSHOT"
     
-    # Check if failover disk already exists and handle it properly
-    if gcloud compute disks describe app-standby-disk-failover --zone=us-central1-c >/dev/null 2>&1; then
-      echo "Failover disk already exists, checking if it's attached..."
-      
-      # Check if the disk is attached to the standby VM
-      ATTACHED_DISKS=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(disks[].source)" 2>/dev/null || echo "")
-      if [[ $ATTACHED_DISKS == *"app-standby-disk-failover"* ]]; then
-        echo "Failover disk is attached to standby VM, detaching it first..."
-        gcloud compute instances detach-disk app-web-server-dr-standby \
-          --disk=app-standby-disk-failover \
-          --zone=us-central1-c 2>/dev/null || true
-        echo "Waiting for disk detachment..."
-        sleep 10
-      fi
-      
-      echo "Deleting existing failover disk..."
-      gcloud compute disks delete app-standby-disk-failover --zone=us-central1-c --quiet
-      echo "Waiting for disk deletion to complete..."
-      sleep 15
-    fi
+    # 5. Use safe disk cleanup for failover disk
+    status "Safely cleaning up existing failover disk if present"
+    safe_disk_cleanup "app-standby-disk-failover" "us-central1-c" "app-web-server-dr-standby"
     
-    # Get the UEFI settings of the boot disk
+    # 6. Get the UEFI settings of the boot disk
     BOOT_DISK_UEFI=$(gcloud compute disks describe app-standby-boot-disk --zone=us-central1-c --format="json" | grep -i "uefi")
     
-    # Create the new disk with matching UEFI settings
+    # 7. Create the new disk with matching UEFI settings
+    status "Creating new failover disk from snapshot"
     if [[ -n "$BOOT_DISK_UEFI" ]]; then
       gcloud compute disks create app-standby-disk-failover \
         --source-snapshot=$LATEST_BOOT_SNAPSHOT \
@@ -323,87 +374,83 @@ case "$1" in
         --zone=us-central1-c
     fi
     
-    # 5. Attach the new disk to the standby VM
-    status "Attaching new disk to standby VM"
+    # 8. Prepare standby VM for new boot disk
+    status "Preparing standby VM for new boot disk"
     
-    # Stop the standby VM if it's running
+    # Ensure VM is stopped
     gcloud compute instances stop app-web-server-dr-standby --zone=us-central1-c --quiet 2>/dev/null || true
     
-    # Wait for VM to stop
+    # Wait for VM to stop completely
     while [[ "$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(status)' 2>/dev/null)" == "RUNNING" ]]; do
       echo "Waiting for VM to stop..."
       sleep 5
     done
     
-    # Ensure the regional disk is attached to the standby VM
-    status "Ensuring regional disk is attached to standby VM"
+    # 9. Detach ALL disks from standby VM
+    status "Detaching all disks from standby VM"
     
-    # Check if the regional disk is already attached
-    ATTACHED_DISKS=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(disks[].source)")
-    if [[ $ATTACHED_DISKS != *"app-regional-disk"* ]]; then
-      echo "Attaching regional disk to standby VM..."
-      gcloud compute instances attach-disk app-web-server-dr-standby \
-        --disk=app-regional-disk \
-        --disk-scope=regional \
-        --device-name=app-data-disk \
-        --zone=us-central1-c
-      
-      # Wait for attachment to complete
-      sleep 10
-    else
-      echo "Regional disk is already attached to standby VM"
-    fi
-    
-    # Detach the current disk if attached
+    # Detach original boot disk
+    echo "Detaching original boot disk..."
     gcloud compute instances detach-disk app-web-server-dr-standby \
       --disk=app-standby-boot-disk \
       --zone=us-central1-c 2>/dev/null || true
-
-    # Verify disk is detached
-    echo "Verifying disk detachment..."
-    sleep 5  # Give some time for the operation to complete
-    ATTACHED_DISKS=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(disks[].source)")
-    if [[ $ATTACHED_DISKS == *"app-standby-boot-disk"* ]]; then
-      echo "Warning: Boot disk is still attached. Retrying detachment..."
-      gcloud compute instances detach-disk app-web-server-dr-standby \
-        --disk=app-standby-boot-disk \
-        --zone=us-central1-c
-      sleep 10  # Wait longer after retry
-    fi
-
-    # Attach the new disk with explicit device name
-    echo "Attaching new boot disk..."
+    
+    # Detach regional disk if attached
+    echo "Detaching regional disk if attached..."
+    gcloud compute instances detach-disk app-web-server-dr-standby \
+      --disk=app-regional-disk \
+      --disk-scope=regional \
+      --zone=us-central1-c 2>/dev/null || true
+    
+    # Wait for all detachments to complete
+    echo "Waiting for all disk detachments to complete..."
+    sleep 20
+    
+    # 10. Attach new boot disk
+    status "Attaching new boot disk"
     gcloud compute instances attach-disk app-web-server-dr-standby \
       --disk=app-standby-disk-failover \
       --device-name=boot-disk \
       --boot \
       --zone=us-central1-c
-
-    # Verify disk is attached as boot
-    echo "Verifying boot disk attachment..."
-    sleep 5
+    
+    # 11. Attach regional disk
+    status "Attaching regional disk"
+    gcloud compute instances attach-disk app-web-server-dr-standby \
+      --disk=app-regional-disk \
+      --disk-scope=regional \
+      --device-name=app-data-disk \
+      --zone=us-central1-c
+    
+    # Wait for attachments to complete
+    echo "Waiting for disk attachments to complete..."
+    sleep 15
+    
+    # 12. Verify disk configuration
+    echo "Verifying disk configuration..."
     BOOT_DISK=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format="value(disks[0].source)")
     if [[ $BOOT_DISK != *"app-standby-disk-failover"* ]]; then
       echo "Error: Failed to attach boot disk properly."
       exit 1
     fi
+    echo "Boot disk successfully attached: $BOOT_DISK"
     
-    # 6. Start the DR VM
+    # 13. Start the DR VM
     status "Starting DR VM"
     gcloud compute instances start app-web-server-dr-standby --zone=us-central1-c
     
-    # 7. Wait for VM to be ready
+    # 14. Wait for VM to be ready
     status "Waiting for DR VM to be ready"
     while [[ "$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(status)')" != "RUNNING" ]]; do
       echo "Waiting for VM to start..."
       sleep 5
     done
     
-    # 8. Wait for application to initialize
+    # 15. Wait for application to initialize
     status "Waiting for application to initialize"
     sleep 30
     
-    # 9. Add the standby VM to the DR instance group (if not already added)
+    # 16. Add the standby VM to the DR instance group (if not already added)
     status "Adding standby VM to instance group"
     CURRENT_INSTANCES=$(gcloud compute instance-groups unmanaged list-instances app-standby-group --zone=us-central1-c --format="value(instance)" 2>/dev/null || echo "")
     if [[ $CURRENT_INSTANCES != *"app-web-server-dr-standby"* ]]; then
@@ -415,20 +462,20 @@ case "$1" in
       echo "Standby VM is already in the instance group"
     fi
     
-    # 10. Three-tier verification
+    # 17. Three-tier verification
     DR_IP=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
     verify_app_three_tier "$DR_IP" "us-central1-c"
     
-    # 11. Calculate RTO
+    # 18. Calculate RTO
     end_time=$(date +%s)
     rto=$((end_time - start_time))
     echo "Failover completed in $rto seconds"
     
-    # 12. Write custom metrics
+    # 19. Write custom metrics
     write_custom_metric "recovery_time" "${rto}" "failover"
     write_custom_metric "success_rate" "1.0" "failover"
     
-    # 13. Check metrics after failover
+    # 20. Check metrics after failover
     #check_metrics
     
     status "Failover test completed"
@@ -634,54 +681,7 @@ EOF
     
     # 3. Insert initial data into the existing records table
     status "Inserting initial data into the records table"
-    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
--- Insert initial data that should be preserved after recovery
-INSERT INTO records (data) VALUES ('Initial data - should be preserved after recovery');
-
--- Show the current data in the records table
-SELECT * FROM records;
-EOF
-    
-    # 4. Set recovery point
-    echo ""
-    read -p "Press Enter to set the recovery point..." dummy
-    RECOVERY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    status "Recovery point set at: $RECOVERY_TIME"
-    
-    # 5. Add more data
-    status "Adding more data (this will be lost after recovery)"
-    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
--- Insert data that should be lost after recovery
-INSERT INTO records (data) VALUES ('Later data - should be lost after recovery');
-
--- Show all data in the records table
-SELECT * FROM records;
-EOF
-    
-    # 6. Create a clone at the recovery point
-    status "Creating a clone at the recovery point"
-    gcloud sql instances clone app-db-instance-dr pitr-demo-instance \
-      --point-in-time="$RECOVERY_TIME"
-    
-    # 7. Wait for the clone operation to complete
-    status "Waiting for clone to be ready"
-    while [[ "$(gcloud sql instances describe pitr-demo-instance --format='value(state)' 2>/dev/null)" != "RUNNABLE" ]]; do
-      echo "Waiting for instance to be ready..."
-      sleep 10
-    done
-    
-    # 8. Verify the data in the clone
-    CLONE_IP=$(gcloud sql instances describe pitr-demo-instance --format="value(ipAddresses[0].ipAddress)")
-    status "Verifying data in the clone (should only have initial data)"
-    mysql -h $CLONE_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOSQL
--- Check that only the initial data is present
-SELECT * FROM records;
-EOSQL
-    
-    # 9. Provide cleanup instructions
-    echo ""
-    status "Point-in-Time Recovery demo complete!"
-    echo "When finished, clean up with:"
+    mysql -h $DB_IP -u $DB_USER
     echo "gcloud sql instances delete pitr-demo-instance --quiet"
     ;;
 
