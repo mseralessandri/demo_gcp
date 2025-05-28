@@ -70,6 +70,12 @@ cd ~/dr-demo || {
   exit 1
 }
 
+# Navigate to the app subdirectory where the binary should be
+cd app || {
+  echo "ERROR: App subdirectory ~/dr-demo/app not found!"
+  exit 1
+}
+
 # Verify application binary exists (should exist from snapshot)
 if [ ! -f dr-demo ] || [ ! -x dr-demo ]; then
   echo "ERROR: Application binary ~/dr-demo/dr-demo not found or not executable!"

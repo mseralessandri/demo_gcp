@@ -153,9 +153,9 @@ resource "google_compute_firewall" "allow_http" {
   target_tags   = ["web"]
 }
 
-# Allow SSH traffic for management
-resource "google_compute_firewall" "allow_ssh" {
-  name    = "allow-ssh-dr"
+# Allow SSH traffic through Identity-Aware Proxy (IAP) only
+resource "google_compute_firewall" "allow_ssh_iap" {
+  name    = "allow-ssh-iap-dr"
   network = "default"
 
   allow {
@@ -163,7 +163,8 @@ resource "google_compute_firewall" "allow_ssh" {
     ports    = ["22"]
   }
 
-  source_ranges = ["0.0.0.0/0"]
+  # IAP IP range for secure SSH tunneling
+  source_ranges = var.iap_source_ranges
   target_tags   = ["web"]
 }
 

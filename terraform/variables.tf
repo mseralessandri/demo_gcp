@@ -191,3 +191,8 @@ variable "health_check_source_ranges" {
   description = "Source IP ranges for Google Cloud health checks"
   type        = list(string)
 }
+
+variable "iap_source_ranges" {
+  description = "Source IP ranges for Identity-Aware Proxy (IAP) SSH access"
+  type        = list(string)
+}

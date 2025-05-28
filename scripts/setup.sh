@@ -87,6 +87,9 @@ else
   git clone https://github.com/mseralessandri/demo_gcp.git . || exit 1
 fi
 
+# Navigate to the app directory where main.go is located
+cd app
+
 echo "Retrieve DB credentials..."
 set +x
 # Retrieve secrets
