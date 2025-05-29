@@ -119,13 +119,24 @@ verify_app() {
   local RETRY_INTERVAL=10
   local RETRIES=0
   
-  echo "Verifying application at $PROTOCOL://$IP:$PORT/web"
+  echo "Verifying application at $PROTOCOL://$IP/web"
   
   while [ $RETRIES -lt $MAX_RETRIES ]; do
-    curl -s -k "$PROTOCOL://$IP:$PORT/web" > /dev/null
-    if [ $? -eq 0 ]; then
-      echo "SUCCESS: Application is responding"
-      return 0
+    # Use curl with -w to get the HTTP status code
+    HTTP_STATUS=$(curl -s -k -o /dev/null -w "%{http_code}" "$PROTOCOL://$IP:$PORT/web")
+    CURL_STATUS=$?
+    
+    # Check if curl command succeeded
+    if [ $CURL_STATUS -eq 0 ]; then
+      # Check HTTP status code
+      if [ "$HTTP_STATUS" -ge 200 ] && [ "$HTTP_STATUS" -lt 300 ]; then
+        echo "SUCCESS: Application is responding properly with status code $HTTP_STATUS"
+        return 0
+      else
+        echo "Attempt $((RETRIES+1))/$MAX_RETRIES: Application returned status code $HTTP_STATUS"
+        sleep $RETRY_INTERVAL
+        RETRIES=$((RETRIES+1))
+      fi
     else
       echo "Attempt $((RETRIES+1))/$MAX_RETRIES: Application not responding yet, retrying in $RETRY_INTERVAL seconds..."
       sleep $RETRY_INTERVAL
@@ -133,17 +144,15 @@ verify_app() {
     fi
   done
   
-  echo "ERROR: Application is not responding after $MAX_RETRIES attempts"
+  echo "ERROR: Application is not responding correctly after $MAX_RETRIES attempts"
   return 1
 }
 
-# Function to verify application with three-tier strategy
-verify_app_three_tier() {
+# Function to verify application with two-tier strategy
+verify_app_two_tier() {
   local VM_IP=$1
   local VM_ZONE=$2
-  
-  status "Three-tier verification: HTTPS LB -> HTTP LB -> Direct VM access"
-  
+    
   # Get load balancer IPs
   LB_HTTP_IP=$(cd ../terraform && terraform output -raw load_balancer_http_ip 2>/dev/null)
   LB_HTTPS_IP=$(cd ../terraform && terraform output -raw load_balancer_https_ip 2>/dev/null)
@@ -165,22 +174,7 @@ verify_app_three_tier() {
       echo "SUCCESS: HTTP load balancer verification successful"
       return 0
     fi
-    echo "HTTP load balancer failed, trying direct VM access..."
-  fi
-  
-  # Tier 3: Try direct VM access if both load balancers failed
-  if [ ! -z "$VM_IP" ]; then
-    echo "Tier 3: Trying direct VM access..."
-    # Try HTTPS first, then HTTP on direct VM
-    if verify_app "$VM_IP" "8443" "https"; then
-      echo "SUCCESS: Direct VM HTTPS verification successful"
-      return 0
-    fi
-    echo "Direct VM HTTPS failed, trying HTTP..."
-    if verify_app "$VM_IP" "8080" "http"; then
-      echo "SUCCESS: Direct VM HTTP verification successful"
-      return 0
-    fi
+    echo "HTTP load balancer failed"
   fi
   
   echo "ERROR: All verification tiers failed - application is not responding"
@@ -238,9 +232,7 @@ function show_usage {
   echo "  status        - Show current status of primary and standby resources"
   echo "  failover      - Simulate failure and perform failover to standby zone"
   echo "  failback      - Perform failback to primary zone"
-  echo "  snapshot      - Create on-demand snapshots of VM disk and database"
-  echo "  restore-disk  - Demonstrate disk restore from snapshot"
-  echo "  restore-db    - Demonstrate database point-in-time recovery"
+  echo "  snapshot      - Create on-demand snapshots of VM boot disk"
   echo "  test-all      - Run a complete DR demo (failover + failback)"
   echo ""
 }
@@ -285,11 +277,6 @@ case "$1" in
     # Check snapshots
     echo "Recent boot disk snapshots:"
     gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" \
-      --sort-by=~creationTimestamp --limit=3 \
-      --format="table(name,diskSizeGb,creationTimestamp)" 2>/dev/null || echo "None found"
-      
-    echo "Recent data disk snapshots:"
-    gcloud compute snapshots list --filter="sourceDisk:app-regional-disk" \
       --sort-by=~creationTimestamp --limit=3 \
       --format="table(name,diskSizeGb,creationTimestamp)" 2>/dev/null || echo "None found"
     
@@ -462,9 +449,9 @@ case "$1" in
       echo "Standby VM is already in the instance group"
     fi
     
-    # 17. Three-tier verification
+    # 17. Two-tier verification
     DR_IP=$(gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
-    verify_app_three_tier "$DR_IP" "us-central1-c"
+    verify_app_two_tier "$DR_IP" "us-central1-c"
     
     # 18. Calculate RTO
     end_time=$(date +%s)
@@ -535,13 +522,21 @@ case "$1" in
     echo "Waiting for disk attachment to complete..."
     sleep 10
     
-    # 7. Wait for application to initialize
+    # 7. Add primary VM to its instance group
+    status "Adding primary VM to instance group"
+    CURRENT_PRIMARY_INSTANCES=$(gcloud compute instance-groups unmanaged list-instances app-primary-group --zone=us-central1-a --format="value(instance)" 2>/dev/null || echo "")
+    if [[ $CURRENT_PRIMARY_INSTANCES != *"app-web-server-dr-primary"* ]]; then
+      echo "Adding primary VM to instance group..."
+      gcloud compute instance-groups unmanaged add-instances app-primary-group \
+        --zone=us-central1-a \
+        --instances=app-web-server-dr-primary
+    else
+      echo "Primary VM is already in the instance group"
+    fi
+    
+    # 8. Wait for application to initialize
     status "Waiting for application to initialize"
     sleep 30
-    
-    # 8. Three-tier verification
-    PRIMARY_IP=$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
-    verify_app_three_tier "$PRIMARY_IP" "us-central1-a"
     
     # 9. Remove the standby VM from the DR instance group
     status "Removing standby VM from instance group"
@@ -549,16 +544,20 @@ case "$1" in
       --zone=us-central1-c \
       --instances=app-web-server-dr-standby 2>/dev/null || true
     
-    # 10. Calculate RTO
+    # 10. Two-tier verification
+    PRIMARY_IP=$(gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --format='value(networkInterfaces[0].accessConfigs[0].natIP)')
+    verify_app_two_tier "$PRIMARY_IP" "us-central1-a"
+    
+    # 11. Calculate RTO
     end_time=$(date +%s)
     rto=$((end_time - start_time))
     echo "Failback completed in $rto seconds"
     
-    # 11. Write custom metrics
+    # 12. Write custom metrics
     write_custom_metric "recovery_time" "${rto}" "failback"
     write_custom_metric "success_rate" "1.0" "failback"
     
-    # 12. Check metrics after failback
+    # 13. Check metrics after failback
     #check_metrics
     
     status "Failback test completed"
@@ -574,173 +573,17 @@ case "$1" in
     gcloud compute snapshots create $BOOT_SNAPSHOT_NAME \
       --source-disk=app-primary-boot-disk \
       --source-disk-zone=us-central1-a \
-      --description="Demo boot disk snapshot created on $(date)"
+      --description="Boot disk snapshot created on $(date)"
     
-    # 2. Creating database backup
-    status "Creating database backup"
-    BACKUP_ID="demo-backup-$(date +%Y%m%d%H%M%S)"
-    gcloud sql backups create --instance=app-db-instance-dr \
-      --description="Demo backup created on $(date)"
-    
-    # 3. Get database credentials and insert test data for snapshot verification
-    DB_IP=$(gcloud sql instances describe app-db-instance-dr --format="value(ipAddresses[0].ipAddress)")
-    get_db_credentials
-    
-    status "Inserting test data for snapshot verification"
-    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
--- Insert a snapshot verification record
-INSERT INTO records (data) VALUES ('Snapshot verification record - $(date)');
 
--- Show the current data in the records table
-SELECT * FROM records;
-EOF
     
     # 4. Verify snapshots
     status "Verifying snapshots"
     echo "Boot disk snapshot:"
     gcloud compute snapshots list --filter="name:$BOOT_SNAPSHOT_NAME" \
       --format="table(name,diskSizeGb,creationTimestamp)"
-    
-    echo "Database backups:"
-    gcloud sql backups list --instance=app-db-instance-dr \
-      --limit=1 \
-      --format="table(id,windowStartTime,status)"
-    
-    status "Snapshot completed successfully"
     ;;
 
-  restore-disk)
-    status "DISK RESTORE DEMO"
-    
-    # 1. List available snapshots
-    status "Available boot disk snapshots"
-    gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" \
-      --sort-by=~creationTimestamp --limit=5 \
-      --format="table(name,diskSizeGb,creationTimestamp)"
-    
-    # 2. Select a boot disk snapshot to restore from
-    echo ""
-    read -p "Enter boot disk snapshot name to restore from (or press Enter to use latest): " SNAPSHOT_NAME
-    
-    if [ -z "$SNAPSHOT_NAME" ]; then
-      SNAPSHOT_NAME=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk" \
-        --sort-by=~creationTimestamp --limit=1 --format="value(name)")
-      echo "Using latest boot disk snapshot: $SNAPSHOT_NAME"
-    fi
-    
-    # 3. Create a test disk from the snapshot
-    status "Creating test disk from snapshot"
-    gcloud compute disks create demo-restore-disk \
-      --source-snapshot=$SNAPSHOT_NAME \
-      --zone=us-central1-a
-    
-    # 4. Create a temporary VM to attach the disk
-    status "Creating temporary VM for disk verification"
-    gcloud compute instances create demo-restore-vm \
-      --zone=us-central1-a \
-      --machine-type=e2-medium \
-      --boot-disk-size=10GB \
-      --boot-disk-type=pd-balanced
-    
-    # 5. Attach the test disk to the VM
-    status "Attaching restored disk to VM"
-    gcloud compute instances attach-disk demo-restore-vm \
-      --disk=demo-restore-disk \
-      --zone=us-central1-a
-    
-    # 6. Provide instructions for verification
-    echo ""
-    status "Disk restore demo complete!"
-    echo ""
-    echo "To verify the disk contents, SSH to the VM:"
-    echo "gcloud compute ssh demo-restore-vm --zone=us-central1-a"
-    echo "Then run: sudo mkdir -p /mnt/disk && sudo mount /dev/sdb1 /mnt/disk && ls -la /mnt/disk"
-    echo ""
-    echo "When finished, clean up with:"
-    echo "gcloud compute instances delete demo-restore-vm --zone=us-central1-a --quiet"
-    echo "gcloud compute disks delete demo-restore-disk --zone=us-central1-a --quiet"
-    ;;
-    
-  restore-db)
-    status "DATABASE POINT-IN-TIME RECOVERY DEMO"
-    
-    # 1. Explain the demo
-    echo "This demo will:"
-    echo "1. Use the existing 'records' table from database.sql"
-    echo "2. Insert initial data into the records table"
-    echo "3. Wait for you to confirm when to set the recovery point"
-    echo "4. Add more data (that will be lost after recovery)"
-    echo "5. Create a clone of the database at the recovery point"
-    echo "6. Show that the data added after the recovery point is not in the clone"
-    echo ""
-    read -p "Press Enter to begin..." dummy
-    
-    # 2. Get database connection details and credentials
-    DB_IP=$(gcloud sql instances describe app-db-instance-dr --format="value(ipAddresses[0].ipAddress)")
-    get_db_credentials
-    
-    # 3. Insert initial data into the existing records table
-    status "Inserting initial data into the records table"
-    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
--- Insert initial data that should be preserved after recovery
-INSERT INTO records (data) VALUES ('Initial data - $(date)');
-SELECT 'Initial data inserted' as status;
-SELECT * FROM records ORDER BY id DESC LIMIT 5;
-EOF
-    
-    # 4. Set recovery point
-    echo ""
-    echo "Initial data has been inserted. This is your recovery point."
-    read -p "Press Enter to continue and add data that will be lost after recovery..." dummy
-    RECOVERY_TIME=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ")
-    echo "Recovery point set at: $RECOVERY_TIME"
-    
-    # 5. Insert data that will be lost after recovery
-    status "Inserting data that will be lost after recovery"
-    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME <<EOF
--- Insert data that should be lost after recovery
-INSERT INTO records (data) VALUES ('Data to be lost - $(date)');
-INSERT INTO records (data) VALUES ('More data to be lost - $(date)');
-SELECT 'Data to be lost inserted' as status;
-SELECT * FROM records ORDER BY id DESC LIMIT 5;
-EOF
-    
-    # 6. Create database clone at recovery point
-    status "Creating database clone at recovery point"
-    CLONE_INSTANCE_NAME="pitr-demo-instance-$(date +%Y%m%d%H%M%S)"
-    
-    gcloud sql instances clone app-db-instance-dr $CLONE_INSTANCE_NAME \
-      --point-in-time="$RECOVERY_TIME" \
-      --async
-    
-    echo "Waiting for clone operation to complete..."
-    sleep 60
-    
-    # 7. Wait for clone to be ready
-    while [[ "$(gcloud sql instances describe $CLONE_INSTANCE_NAME --format='value(state)' 2>/dev/null)" != "RUNNABLE" ]]; do
-      echo "Waiting for clone to be ready..."
-      sleep 30
-    done
-    
-    # 8. Compare data between original and cloned database
-    status "Comparing data between original and cloned database"
-    
-    CLONE_IP=$(gcloud sql instances describe $CLONE_INSTANCE_NAME --format="value(ipAddresses[0].ipAddress)")
-    
-    echo "Data in original database (should include data added after recovery point):"
-    mysql -h $DB_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME -e "SELECT * FROM records ORDER BY id DESC LIMIT 10;"
-    
-    echo ""
-    echo "Data in cloned database (should NOT include data added after recovery point):"
-    mysql -h $CLONE_IP -u $DB_USER -p$DB_PASSWORD $DB_NAME -e "SELECT * FROM records ORDER BY id DESC LIMIT 10;"
-    
-    # 9. Cleanup
-    echo ""
-    echo "Point-in-time recovery demo completed!"
-    echo ""
-    echo "To clean up the demo clone instance, run:"
-    echo "gcloud sql instances delete $CLONE_INSTANCE_NAME --quiet"
-    ;;
 
   test-all)
     status "RUNNING COMPLETE DR DEMO"
