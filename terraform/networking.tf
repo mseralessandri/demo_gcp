@@ -72,7 +72,8 @@ resource "google_compute_backend_service" "app_backend" {
   
   backend {
     group = google_compute_instance_group.primary_group.id
-    balancing_mode = "UTILIZATION"
+    balancing_mode = "UTILIZATION" # Use utilization balancing mode for better resource management
+    # Set capacity_scaler to 1.0 to ensure the primary group is fully utilized equal priority
     capacity_scaler = 1.0
   }
   

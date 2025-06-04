@@ -55,11 +55,6 @@ variable "setup_script_path" {
   type        = string
 }
 
-variable "setup_failover_script_path" {
-  description = "Path to the minimal failover/failback script"
-  type        = string
-}
-
 variable "go_version" {
   description = "Version of Go to install"
   type        = string

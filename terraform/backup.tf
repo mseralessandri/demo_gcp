@@ -84,26 +84,3 @@ resource "google_storage_bucket_iam_binding" "backup_bucket_binding" {
   ]
 }
 
-# -----------------------------------------------------------------------------
-# BACKUP VERIFICATION
-# -----------------------------------------------------------------------------
-# Cloud Function to verify backups (placeholder - would be implemented in a
-# production environment)
-
-# For a demo environment, we'll use a simple Cloud Scheduler job to
-# periodically check backup status
-
-resource "google_cloud_scheduler_job" "backup_verification_job" {
-  name        = "dr-backup-verification"
-  description = "Verify DR backups"
-  schedule    = "0 */6 * * *"  # Run every 6 hours
-  
-  http_target {
-    uri         = "https://cloudfunction-placeholder-url/verifyBackups"
-    http_method = "POST"
-    body        = base64encode("{\"projectId\": \"${var.project_id}\"}")
-    
-    # In a real implementation, this would point to an actual Cloud Function
-    # that verifies backups and sends notifications
-  }
-}

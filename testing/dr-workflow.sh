@@ -23,11 +23,12 @@ execute_workflow() {
   
   status "Executing workflow: $workflow_name"
   
-  # Execute the workflow
-  EXECUTION_FULL_NAME=$(gcloud workflows run $workflow_name \
-    --data="$arguments" \
-    --location=$region \
-    --format="value(name)")
+    # Execute the workflow
+    echo "Executing workflow with arguments: $arguments"
+    EXECUTION_FULL_NAME=$(gcloud workflows run $workflow_name \
+      --data="$arguments" \
+      --location=$region \
+      --format="value(name)")
   
   # Extract just the execution ID from the full name
   EXECUTION_ID=$(echo $EXECUTION_FULL_NAME | sed 's|.*/||')
@@ -183,15 +184,15 @@ case "$1" in
     
     if [[ -n "$BOOT_SNAPSHOTS" ]]; then
       echo "✓ Found existing boot disk snapshots - reusing for fast demo"
-      execute_workflow "dr-failover-workflow" '{"force_snapshot": false}'
+      execute_workflow "dr-failover-workflow" '{}'
     else
       echo "⚠ No existing snapshots found - creating new ones (this may take longer)"
-      execute_workflow "dr-failover-workflow" '{"force_snapshot": true}'
+      execute_workflow "dr-failover-workflow" '{}'
     fi
     ;;
     
   failback)
-    execute_workflow "dr-failback-workflow" "{}"
+    execute_workflow "dr-failback-workflow" '{}'
     ;;
     
   monitor)
@@ -218,12 +219,12 @@ case "$1" in
     # Perform failover
     echo ""
     read -p "Press Enter to begin failover..." dummy
-    execute_workflow "dr-failover-workflow" '{"force_snapshot": false}'
+    execute_workflow "dr-failover-workflow" '{}'
     
     # Perform failback
     echo ""
     read -p "Press Enter to begin failback..." dummy
-    execute_workflow "dr-failback-workflow" "{}"
+    execute_workflow "dr-failback-workflow" '{}'
     
     # Show final status
     echo ""

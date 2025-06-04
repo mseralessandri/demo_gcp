@@ -58,11 +58,54 @@ if [ "$(id -u)" -eq 0 ]; then
   rm go${GO_VERSION}.linux-amd64.tar.gz
   chown -R goapp:goapp /usr/local/go
 
+  # Create systemd service file for the application
+  cat > /etc/systemd/system/dr-demo.service <<EOF
+[Unit]
+Description=DR Demo Application
+After=network.target mnt-regional\\x2ddisk.mount
+Wants=mnt-regional\\x2ddisk.mount
+
+[Service]
+Type=simple
+User=goapp
+WorkingDirectory=/home/goapp/dr-demo/app
+EnvironmentFile=/home/goapp/dr-demo/app/.env
+ExecStart=/home/goapp/dr-demo/app/dr-demo
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  # Enable the service (it will be started after the goapp user completes setup)
+  systemctl enable dr-demo.service
+
   # Re-run this script as non-root user
   cp "$0" /home/goapp/setup.sh
   chown goapp:goapp /home/goapp/setup.sh
   chmod +x /home/goapp/setup.sh
+  
+  # Remove startup script metadata
+  echo "Removing startup script metadata..."
+  INSTANCE_NAME=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/name" -H "Metadata-Flavor: Google")
+  INSTANCE_ZONE=$(curl -s "http://metadata.google.internal/computeMetadata/v1/instance/zone" -H "Metadata-Flavor: Google" | cut -d/ -f4)
+  gcloud compute instances remove-metadata $INSTANCE_NAME --zone=$INSTANCE_ZONE --keys=startup-script
+  
+  # Run as goapp user to build the application
   sudo -u goapp -i /home/goapp/setup.sh
+  
+  # Start the service after goapp user has completed setup
+  systemctl start dr-demo.service
+  
+  # Verify service is running
+  if systemctl is-active --quiet dr-demo.service; then
+    echo "Application service started successfully!"
+  else
+    echo "WARNING: Service failed to start. Check logs with: journalctl -u dr-demo.service"
+  fi
 
   exit 0
 fi
@@ -142,5 +185,5 @@ go get cloud.google.com/go/secretmanager/apiv1
 go mod tidy
 go build -o dr-demo main.go
 
-# Start the app
-nohup ./dr-demo > app.log 2>&1 &
+# The app will be started by systemd from the root part of the script
+echo "Application built successfully. Service will be started by systemd."

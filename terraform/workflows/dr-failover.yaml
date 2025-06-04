@@ -1,295 +1,75 @@
+# =============================================================================
+# SIMPLIFIED DR FAILOVER WORKFLOW
+# =============================================================================
+# This workflow performs disaster recovery failover with systemd service for automatic application startup
+
 main:
-  params: [force_snapshot]
+  params: []
   steps:
     - init:
         assign:
           - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - primary_zone: "us-central1-a"
           - standby_zone: "us-central1-c"
-          - force_snapshot: ${default(force_snapshot, false)}
           - start_time: ${sys.now()}
-          - stop_standby_operation: null
-          - detach_boot_operation: null
-    
-    # Step 1: Check if snapshots exist and create if needed
-    - check_boot_snapshots:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots?filter=sourceDisk%3Dapp-primary-boot-disk&maxResults=1"}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: snapshot_response
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_snapshot_error:
-                call: sys.log
-                args:
-                  text: "Snapshot check failed - using force snapshot mode"
-                  severity: "WARNING"
-            - force_snapshot_creation:
-                assign:
-                  - force_snapshot: true
-                next: create_snapshot_if_needed
-    
-    - create_snapshot_if_needed:
-        switch:
-          - condition: ${force_snapshot or not("items" in snapshot_response.body) or len(snapshot_response.body.items) == 0}
-            next: create_boot_snapshot
-        next: check_data_snapshots
-    
+
+    # # Step 1: Check if snapshot exists or create one
+    # - check_snapshot_exists:
+    #     call: http.get
+    #     args:
+    #       url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots"}
+    #       auth:
+    #         type: OAuth2
+    #       query:
+    #         filter: "sourceDisk=app-primary-boot-disk"
+    #         maxResults: 1
+    #     result: snapshot_list
+
+    # - decide_snapshot_creation:
+    #     switch:
+    #       - condition: ${len(snapshot_list.body.items) == 0}
+    #         next: create_boot_snapshot
+    #     next: stop_primary_vm
+
     - create_boot_snapshot:
-        try:
-          call: http.post
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/disks/app-primary-boot-disk/createSnapshot"}
-            auth:
-              type: OAuth2
-            timeout: 60
-            body:
-              name: ${"boot-snapshot-" + string(int(sys.now() / 1000))}
-              description: "Automatic snapshot for DR testing"
-          result: create_snapshot_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_snapshot_create_error:
-                call: sys.log
-                args:
-                  text: "Boot snapshot creation failed - continuing without snapshot"
-                  severity: "ERROR"
-                next: check_data_snapshots
-    
-    - wait_for_boot_snapshot:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + create_snapshot_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: snapshot_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 3
-            max_delay: 20
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_snapshot_wait_error:
-                call: sys.log
-                args:
-                  text: "Snapshot operation check failed - continuing"
-                  severity: "WARNING"
-                next: check_data_snapshots
-    
-    - check_boot_snapshot_done:
-        switch:
-          - condition: ${snapshot_status.body.status != "DONE"}
-            next: sleep_then_check_boot_snapshot
-        next: check_data_snapshots
-    
-    - sleep_then_check_boot_snapshot:
+        assign:
+          - timestamp: ${string(int(sys.now() / 1000))}
+          - snapshot_name: ${"boot-snapshot-workflow-" + timestamp}
+        next: create_snapshot_request
+        
+    - create_snapshot_request:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/disks/app-primary-boot-disk/createSnapshot"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            name: ${snapshot_name}
+            description: "Automatic snapshot for DR testing"
+        result: create_snapshot_operation
+
+    - wait_for_snapshot:
         call: sys.sleep
         args:
-          seconds: 5
-        next: wait_for_boot_snapshot
-    
-    # Step 2: Check if data disk snapshots exist and create if needed
-    - check_data_snapshots:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots?filter=sourceDisk%3Dapp-regional-disk&maxResults=1"}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: data_snapshot_response
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_data_snapshot_error:
-                call: sys.log
-                args:
-                  text: "Data snapshot check failed - continuing without data snapshot"
-                  severity: "WARNING"
-            - continue_without_data_snapshot:
-                assign:
-                  - data_snapshot_response: {"body": {"items": []}}
-                next: stop_primary_vm
-    
-    - create_data_snapshot_if_needed:
-        switch:
-          - condition: ${force_snapshot or not("items" in data_snapshot_response.body) or len(data_snapshot_response.body.items) == 0}
-            next: create_data_snapshot
-        next: stop_primary_vm
-    
-    - create_data_snapshot:
-        try:
-          call: http.post
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/regions/us-central1/disks/app-regional-disk/createSnapshot"}
-            auth:
-              type: OAuth2
-            timeout: 60
-            body:
-              name: ${"data-snapshot-" + string(int(sys.now() / 1000))}
-              description: "Automatic snapshot of regional disk for DR testing"
-          result: create_data_snapshot_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 3
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_data_snapshot_create_error:
-                call: sys.log
-                args:
-                  text: "Data snapshot creation failed - continuing"
-                  severity: "WARNING"
-                next: stop_primary_vm
-    
-    - wait_for_data_snapshot:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/regions/us-central1/operations/" + create_data_snapshot_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: data_snapshot_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 2
-            max_delay: 20
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_data_snapshot_wait_error:
-                call: sys.log
-                args:
-                  text: "Data snapshot operation check failed - continuing"
-                  severity: "WARNING"
-                next: stop_primary_vm
-    
-    - check_data_snapshot_done:
-        switch:
-          - condition: ${data_snapshot_status.body.status != "DONE"}
-            next: sleep_then_check_data_snapshot
-        next: stop_primary_vm
-    
-    - sleep_then_check_data_snapshot:
-        call: sys.sleep
-        args:
-          seconds: 5
-        next: wait_for_data_snapshot
-    
-    # Step 3: Stop primary VM
+          seconds: 30
+
+    # Step 2: Stop primary VM
     - stop_primary_vm:
-        try:
-          call: http.post
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/stop"}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: stop_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_stop_error:
-                call: sys.log
-                args:
-                  text: "Critical failure - cannot stop primary VM"
-                  severity: "ERROR"
-            - return_stop_error:
-                return:
-                  status: "error"
-                  message: "Failed to stop primary VM - failover aborted"
-    
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/stop"}
+          auth:
+            type: OAuth2
+          timeout: 60
+        result: stop_operation
+
+    # Step 3: Wait for VM to stop and then detach regional disk
     - wait_for_stop:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + stop_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: stop_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_stop_wait_error:
-                call: sys.log
-                args:
-                  text: "Stop operation check failed - assuming VM stopped"
-                  severity: "WARNING"
-            - sleep_and_continue:
-                call: sys.sleep
-                args:
-                  seconds: 15
-                next: detach_regional_disk
-    
-    - check_stop_done:
-        switch:
-          - condition: ${stop_status.body.status != "DONE"}
-            next: sleep_then_check_stop
-        next: detach_regional_disk
-    
-    - sleep_then_check_stop:
         call: sys.sleep
         args:
-          seconds: 5
-        next: wait_for_stop
-    
-    # Step 4: Detach regional disk from primary VM
+          seconds: 20
+
     - detach_regional_disk:
         try:
           call: http.post
@@ -299,279 +79,73 @@ main:
               type: OAuth2
             timeout: 60
             body:
-              deviceName: "app-data-disk"
-          result: detach_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
+              disk: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+          result: detach_disk_operation
         except:
           as: e
           steps:
-            - log_detach_error:
+            - log_disk_detach_error:
                 call: sys.log
                 args:
-                  text: "Critical failure - cannot detach regional disk"
-                  severity: "ERROR"
-            - return_detach_error:
-                return:
-                  status: "error"
-                  message: "Failed to detach regional disk - failover aborted"
-    
+                  text: "Error detaching regional disk, will continue anyway"
+                  severity: "WARNING"
+                next: wait_for_detach
+
     - wait_for_detach:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/operations/" + detach_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: detach_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_detach_wait_error:
-                call: sys.log
-                args:
-                  text: "Detach operation check failed - assuming disk detached"
-                  severity: "WARNING"
-            - sleep_and_continue_snapshot:
-                call: sys.sleep
-                args:
-                  seconds: 15
-                next: get_latest_boot_snapshot
-    
-    - check_detach_done:
-        switch:
-          - condition: ${detach_status.body.status != "DONE"}
-            next: sleep_then_check_detach
-        next: get_latest_boot_snapshot
-    
-    - sleep_then_check_detach:
         call: sys.sleep
         args:
-          seconds: 5
-        next: wait_for_detach
-    
-    # Step 5: Get latest boot disk snapshot
-    - get_latest_boot_snapshot:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots?filter=sourceDisk%3Dapp-primary-boot-disk&orderBy=creationTimestamp%20desc&maxResults=1"}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: latest_snapshot_response
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_get_snapshot_error:
-                call: sys.log
-                args:
-                  text: "Critical failure - cannot get latest snapshot"
-                  severity: "ERROR"
-            - return_snapshot_get_error:
-                return:
-                  status: "error"
-                  message: "Failed to get latest snapshot - failover aborted"
-    
-    - extract_snapshot_name:
+          seconds: 15
+
+    # Step 4: Use the created snapshot (no need to query for latest)
+    - log_snapshot_info:
+        call: sys.log
+        args:
+          text: Using snapshot ${snapshot_name}
+          severity: "INFO"
+
+    # Step 5: Skip disk deletion and go straight to UEFI settings check
+
+    # Step 6: Check UEFI settings of boot disk
+    - check_uefi_settings:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-boot-disk"}
+          auth:
+            type: OAuth2
+        result: boot_disk_info
+
+    # Step 7: Create new disk with unique name from snapshot with matching UEFI settings
+    - generate_disk_name:
         assign:
-          - latest_snapshot_name: ${latest_snapshot_response.body.items[0].name}
-    
-    # Step 6: Delete failover disk if it exists
-    - check_failover_disk:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-disk-failover"}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: failover_disk_response
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 2
-            max_delay: 10
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - handle_disk_not_found:
-                switch:
-                  - condition: ${e.code == 404}
-                    next: create_failover_disk
-                next: log_disk_check_error
-            - log_disk_check_error:
-                call: sys.log
-                args:
-                  text: "Failover disk check failed - continuing"
-                  severity: "WARNING"
-                next: create_failover_disk
-    
-    - delete_failover_disk:
-        try:
-          call: http.delete
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-disk-failover"}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: delete_disk_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 3
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_delete_disk_error:
-                call: sys.log
-                args:
-                  text: "Failover disk deletion failed - continuing"
-                  severity: "WARNING"
-                next: create_failover_disk
-    
-    - wait_for_delete_disk:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + delete_disk_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: delete_disk_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 2
-            max_delay: 20
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_delete_wait_error:
-                call: sys.log
-                args:
-                  text: "Delete operation check failed - continuing"
-                  severity: "WARNING"
-                next: create_failover_disk
-    
-    - check_delete_disk_done:
-        switch:
-          - condition: ${delete_disk_status.body.status != "DONE"}
-            next: sleep_then_check_delete_disk
+          - disk_name: ${"app-standby-disk-failover-" + timestamp}
+        next: log_disk_name
+
+    - log_disk_name:
+        call: sys.log
+        args:
+          text: Creating disk with name ${disk_name}
+          severity: "INFO"
         next: create_failover_disk
-    
-    - sleep_then_check_delete_disk:
-        call: sys.sleep
-        args:
-          seconds: 5
-        next: wait_for_delete_disk
-    
-    # Step 7: Create new disk from snapshot
+
     - create_failover_disk:
-        try:
-          call: http.post
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks"}
-            auth:
-              type: OAuth2
-            timeout: 120
-            body:
-              name: "app-standby-disk-failover"
-              sourceSnapshot: ${"projects/" + project_id + "/global/snapshots/" + latest_snapshot_name}
-              type: "pd-balanced"
-              guestOsFeatures:
-                - type: "UEFI_COMPATIBLE"
-          result: create_disk_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 10
-            max_delay: 120
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_create_disk_error:
-                call: sys.log
-                args:
-                  text: "Critical failure - cannot create failover disk"
-                  severity: "ERROR"
-            - return_create_disk_error:
-                return:
-                  status: "error"
-                  message: "Failed to create failover disk - failover aborted"
-    
-    - wait_for_create_disk:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + create_disk_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: create_disk_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_create_disk_wait_error:
-                call: sys.log
-                args:
-                  text: "Create disk operation check failed - assuming disk created"
-                  severity: "WARNING"
-            - sleep_and_continue_stop:
-                call: sys.sleep
-                args:
-                  seconds: 30
-                next: stop_standby_vm
-    
-    - check_create_disk_done:
-        switch:
-          - condition: ${create_disk_status.body.status != "DONE"}
-            next: sleep_then_check_create_disk
-        next: stop_standby_vm
-    
-    - sleep_then_check_create_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            name: ${disk_name}
+            sourceSnapshot: ${"projects/" + project_id + "/global/snapshots/" + snapshot_name}
+            guestOsFeatures: ${boot_disk_info.body.guestOsFeatures}
+        result: create_disk_operation
+
+    - wait_for_disk_create:
         call: sys.sleep
         args:
-          seconds: 8
-        next: wait_for_create_disk
-    
-    # Step 8: Stop standby VM if running
+          seconds: 20
+
+    # Step 8: Stop standby VM
     - stop_standby_vm:
         try:
           call: http.post
@@ -581,68 +155,36 @@ main:
               type: OAuth2
             timeout: 60
           result: stop_standby_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 3
-          backoff:
-            initial_delay: 3
-            max_delay: 20
-            multiplier: 2
         except:
           as: e
           steps:
-            - log_stop_standby_error:
+            - log_standby_already_stopped:
                 call: sys.log
                 args:
-                  text: "Standby VM stop failed - continuing"
-                  severity: "WARNING"
-                next: detach_standby_boot_disk
-    
-    - check_stop_standby_result:
-        switch:
-          - condition: ${stop_standby_operation != null}
-            next: wait_for_standby_stop
-        next: detach_standby_boot_disk
-    
+                  text: "Standby VM already stopped or stopping"
+                  severity: "INFO"
+
     - wait_for_standby_stop:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + stop_standby_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: stop_standby_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 2
-            max_delay: 15
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_stop_standby_wait_error:
-                call: sys.log
-                args:
-                  text: "Standby stop operation check failed - continuing"
-                  severity: "WARNING"
-                next: detach_standby_boot_disk
-    
-    - check_standby_stop_done:
-        switch:
-          - condition: ${stop_standby_status.body.status != "DONE"}
-            next: sleep_then_check_standby_stop
-        next: detach_standby_boot_disk
-    
-    - sleep_then_check_standby_stop:
         call: sys.sleep
         args:
-          seconds: 5
-        next: wait_for_standby_stop
-    
-    # Step 9: Detach current boot disk from standby VM
+          seconds: 20
+
+    # Step 9: Detach all disks from standby VM
+    - get_standby_disks:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
+          auth:
+            type: OAuth2
+        result: standby_vm_info
+
+    - log_standby_disks:
+        call: sys.log
+        args:
+          text: "Checking standby VM disks"
+          severity: "INFO"
+        next: detach_standby_boot_disk
+
     - detach_standby_boot_disk:
         try:
           call: http.post
@@ -654,303 +196,172 @@ main:
             body:
               deviceName: "boot"
           result: detach_boot_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 3
-          backoff:
-            initial_delay: 3
-            max_delay: 20
-            multiplier: 2
         except:
           as: e
           steps:
-            - log_detach_boot_error:
+            - log_boot_disk_detach_error:
                 call: sys.log
                 args:
-                  text: "Boot disk detach failed - continuing"
+                  text: "Error detaching boot disk"
                   severity: "WARNING"
-                next: attach_regional_disk
-    
-    - check_detach_boot_result:
-        switch:
-          - condition: ${detach_boot_operation != null}
-            next: wait_for_boot_detach
-        next: attach_regional_disk
-    
-    - wait_for_boot_detach:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + detach_boot_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: detach_boot_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 3
-          backoff:
-            initial_delay: 2
-            max_delay: 15
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_detach_boot_wait_error:
-                call: sys.log
-                args:
-                  text: "Boot detach operation check failed - continuing"
-                  severity: "WARNING"
-                next: attach_regional_disk
-    
-    - check_boot_detach_done:
-        switch:
-          - condition: ${detach_boot_status.body.status != "DONE"}
-            next: sleep_then_check_boot_detach
-        next: attach_regional_disk
-    
-    - sleep_then_check_boot_detach:
-        call: sys.sleep
-        args:
-          seconds: 5
-        next: wait_for_boot_detach
-    
-    # Step 10: Attach regional disk to standby VM
-    - attach_regional_disk:
+                next: try_alternate_detach
+
+    - try_alternate_detach:
         try:
           call: http.post
           args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
             auth:
               type: OAuth2
             timeout: 60
             body:
-              source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
-              deviceName: "app-data-disk"
-              mode: "READ_WRITE"
-          result: attach_regional_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
+              deviceName: "persistent-disk-0"
+          result: detach_boot_operation
         except:
           as: e
           steps:
-            - log_attach_regional_error:
+            - log_alternate_detach_error:
                 call: sys.log
                 args:
-                  text: "Critical failure - cannot attach regional disk"
-                  severity: "ERROR"
-            - return_attach_regional_error:
-                return:
-                  status: "error"
-                  message: "Failed to attach regional disk - failover aborted"
-    
-    - wait_for_regional_attach:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + attach_regional_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: attach_regional_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_attach_regional_wait_error:
-                call: sys.log
-                args:
-                  text: "Regional attach operation check failed - assuming attached"
+                  text: "Error with alternate detach"
                   severity: "WARNING"
-            - sleep_and_continue_boot_attach:
-                call: sys.sleep
-                args:
-                  seconds: 15
-                next: attach_failover_disk
-    
-    - check_regional_attach_done:
-        switch:
-          - condition: ${attach_regional_status.body.status != "DONE"}
-            next: sleep_then_check_regional_attach
-        next: attach_failover_disk
-    
-    - sleep_then_check_regional_attach:
-        call: sys.sleep
-        args:
-          seconds: 5
-        next: wait_for_regional_attach
-    
-    # Step 11: Attach failover disk to standby VM as boot disk
-    - attach_failover_disk:
+
+    - detach_standby_regional_disk:
         try:
           call: http.post
           args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
             auth:
               type: OAuth2
             timeout: 60
             body:
-              source: ${"projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-disk-failover"}
-              deviceName: "boot-disk"
-              boot: true
-          result: attach_boot_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
+              disk: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+          result: detach_regional_operation
         except:
           as: e
           steps:
-            - log_attach_boot_error:
+            - log_regional_disk_detach_error:
                 call: sys.log
                 args:
-                  text: "Critical failure - cannot attach boot disk"
-                  severity: "ERROR"
-            - return_attach_boot_error:
-                return:
-                  status: "error"
-                  message: "Failed to attach boot disk - failover aborted"
-    
+                  text: "Error detaching regional disk"
+                  severity: "WARNING"
+
+    - wait_for_detachments:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    # Step 10: Attach new boot disk to standby VM
+    - attach_new_boot_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            source: ${"projects/" + project_id + "/zones/" + standby_zone + "/disks/" + disk_name}
+            deviceName: "boot-disk"
+            boot: true
+        result: attach_boot_operation
+
     - wait_for_boot_attach:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + attach_boot_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: attach_boot_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_attach_boot_wait_error:
-                call: sys.log
-                args:
-                  text: "Boot attach operation check failed - assuming attached"
-                  severity: "WARNING"
-            - sleep_and_continue_start:
-                call: sys.sleep
-                args:
-                  seconds: 15
-                next: start_standby_vm
-    
-    - check_boot_attach_done:
-        switch:
-          - condition: ${attach_boot_status.body.status != "DONE"}
-            next: sleep_then_check_boot_attach
-        next: start_standby_vm
-    
-    - sleep_then_check_boot_attach:
         call: sys.sleep
         args:
-          seconds: 5
-        next: wait_for_boot_attach
-    
-    # Step 12: Start standby VM
+          seconds: 15
+
+    # Step 11: Attach regional disk to standby VM
+    - attach_regional_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+            deviceName: "app-data-disk"
+            mode: "READ_WRITE"
+        result: attach_regional_operation
+
+    - wait_for_regional_attach:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    # Step 12: Start the standby VM
     - start_standby_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/start"}
+          auth:
+            type: OAuth2
+          timeout: 60
+        result: start_standby_operation
+
+    # Step 13: Wait for VM to be ready
+    - wait_for_vm_ready:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 14: Add standby VM to instance group
+    - add_to_instance_group:
         try:
           call: http.post
           args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/start"}
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instanceGroups/app-standby-group/addInstances"}
             auth:
               type: OAuth2
             timeout: 60
-          result: start_operation
-        retry:
-          predicate: ${http.default_retry_predicate}
-          max_retries: 5
-          backoff:
-            initial_delay: 5
-            max_delay: 60
-            multiplier: 2
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
+          result: add_to_group_operation
         except:
           as: e
           steps:
-            - log_start_error:
+            - log_group_add_error:
                 call: sys.log
                 args:
-                  text: "Critical failure - cannot start standby VM"
-                  severity: "ERROR"
-            - return_start_error:
-                return:
-                  status: "error"
-                  message: "Failed to start standby VM - failover incomplete"
-    
-    - wait_for_start:
-        try:
-          call: http.get
-          args:
-            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/operations/" + start_operation.body.name}
-            auth:
-              type: OAuth2
-            timeout: 60
-          result: start_status
-        retry:
-          predicate: ${http.default_retry_predicate_non_idempotent}
-          max_retries: 5
-          backoff:
-            initial_delay: 3
-            max_delay: 30
-            multiplier: 2
-        except:
-          as: e
-          steps:
-            - log_start_wait_error:
-                call: sys.log
-                args:
-                  text: "Start operation check failed - assuming VM started"
+                  text: "Error adding to instance group"
                   severity: "WARNING"
-            - sleep_and_finish:
-                call: sys.sleep
+
+    # Step 15: Remove primary VM from its instance group
+    - remove_primary_from_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instanceGroups/app-primary-group/removeInstances"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary"}
+          result: remove_from_group_operation
+        except:
+          as: e
+          steps:
+            - log_group_remove_error:
+                call: sys.log
                 args:
-                  seconds: 20
-                next: calculate_recovery_time
-    
-    - check_start_done:
-        switch:
-          - condition: ${start_status.body.status != "DONE"}
-            next: sleep_then_check_start
-        next: calculate_recovery_time
-    
-    - sleep_then_check_start:
+                  text: "Error removing from instance group"
+                  severity: "WARNING"
+
+    # Step 16: Wait for application to initialize
+    - wait_for_app_init:
         call: sys.sleep
         args:
-          seconds: 5
-        next: wait_for_start
-    
-    # Step 13: Calculate recovery time and return success
-    - calculate_recovery_time:
+          seconds: 30
+
+    # Step 17: Calculate and return results
+    - complete_failover:
         assign:
           - end_time: ${sys.now()}
           - recovery_time_seconds: ${(end_time - start_time) / 1000000000}
-    
-    - log_success:
-        call: sys.log
-        args:
-          text: ${"DR failover completed successfully in " + string(recovery_time_seconds) + " seconds"}
-          severity: "INFO"
-    
+        next: return_success
+
     - return_success:
         return:
           status: "success"
@@ -958,4 +369,11 @@ main:
           recovery_time_seconds: ${recovery_time_seconds}
           primary_vm_stopped: true
           standby_vm_started: true
-          regional_disk_attached: true
+          regional_disk_moved: true
+          timestamp: ${timestamp}
+          disk_name: ${disk_name}
+          
+    - return_error:
+        return:
+          status: "error"
+          message: "DR failover failed"

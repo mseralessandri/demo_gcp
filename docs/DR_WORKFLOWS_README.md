@@ -92,28 +92,23 @@ Alerts are sent to the email address specified in the `notification_email` varia
 
 ### Failover Workflow
 
-The failover workflow performs the following steps:
+The simplified failover workflow focuses on core operations:
 
-1. Check if snapshots exist and create if needed
-2. Stop the primary VM
-3. Detach the regional disk from the primary VM
-4. Create a new disk from the latest boot disk snapshot
-5. Stop the standby VM if running
-6. Detach the current boot disk from the standby VM
-7. Attach the regional disk to the standby VM
-8. Attach the new boot disk to the standby VM
-9. Start the standby VM
-10. Add the standby VM to the instance group
+1. **Create snapshot if needed** - Only creates a snapshot if explicitly requested
+2. **Stop primary VM** - Stops the primary VM to prepare for failover
+3. **Detach regional disk** - Detaches the regional disk from the primary VM
+4. **Prepare standby VM** - Ensures the standby VM is stopped and ready
+5. **Attach and start** - Attaches the regional disk to the standby VM and starts it
+6. **Update load balancer** - Adds the standby VM to the instance group
 
 ### Failback Workflow
 
-The failback workflow performs the following steps:
+The simplified failback workflow focuses on essential operations:
 
-1. Stop the standby VM
-2. Detach the regional disk from the standby VM
-3. Start the primary VM
-4. Attach the regional disk to the primary VM
-5. Remove the standby VM from the instance group
+1. **Stop standby VM** - Stops the standby VM and detaches the regional disk
+2. **Start primary VM** - Starts the primary VM
+3. **Attach regional disk** - Attaches the regional disk to the primary VM
+4. **Update load balancer** - Removes the standby VM from the instance group
 
 ## Benefits Over Shell Scripts
 
@@ -165,3 +160,5 @@ Ensure that this service account has only the necessary permissions and follows 
 ## Conclusion
 
 This implementation provides a robust, reliable, and monitored disaster recovery solution using Google Cloud Workflows. By leveraging the serverless nature of workflows, you get the benefits of managed infrastructure while maintaining the familiar shell script interface.
+
+The simplified workflows enhance this solution by reducing complexity, improving maintainability, and reducing execution time, all while maintaining the same functionality.

@@ -503,12 +503,8 @@ case "$1" in
       sleep 5
     done
     
-    # Temporarily change the primary VM's startup script to use the minimal failover script
-    status "Updating primary VM to use minimal startup script"
-    # Use the metadata-from-file option to properly handle special characters
-    gcloud compute instances add-metadata app-web-server-dr-primary \
-      --zone=us-central1-a \
-      --metadata-from-file=startup-script=../scripts/setup_failover.sh
+    # No need to update startup script as we're using systemd service
+    status "Preparing to start primary VM"
     
     # Start the primary VM with minimal startup script
     status "Starting primary VM"
@@ -575,11 +571,8 @@ case "$1" in
     # Check metrics after failback
     #check_metrics
     
-    # Restore the original startup script for future normal startups
-    status "Restoring original startup script"
-    gcloud compute instances remove-metadata app-web-server-dr-primary \
-      --zone=us-central1-a \
-      --keys=startup-script
+    # No need to restore startup script as we're using systemd service
+    status "Failback completed successfully"
     
     status "Failback test completed"
     ;;
