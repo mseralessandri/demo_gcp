@@ -9,7 +9,7 @@
 # -----------------------------------------------------------------------------
 # Snapshot schedule for the regional disk
 
-# Snapshot schedule policy
+# Snapshot schedule policy for regional disk
 resource "google_compute_resource_policy" "snapshot_schedule" {
   name   = "app-snapshot-schedule"
   region = var.region
@@ -17,13 +17,13 @@ resource "google_compute_resource_policy" "snapshot_schedule" {
   snapshot_schedule_policy {
     schedule {
       hourly_schedule {
-        hours_in_cycle = 1  # Take a snapshot every hour
-        start_time     = "00:00"
+        hours_in_cycle = var.disk_snapshot_hours_in_cycle
+        start_time     = var.disk_snapshot_start_time
       }
     }
     
     retention_policy {
-      max_retention_days    = 7  # Keep snapshots for 7 days
+      max_retention_days    = var.disk_snapshot_retention_days
       on_source_disk_delete = "KEEP_AUTO_SNAPSHOTS"
     }
     
@@ -39,6 +39,38 @@ resource "google_compute_region_disk_resource_policy_attachment" "snapshot_attac
   name   = google_compute_resource_policy.snapshot_schedule.name
   disk   = google_compute_region_disk.regional_disk.name
   region = var.region
+}
+
+# Primary boot disk snapshot schedule policy
+resource "google_compute_resource_policy" "primary_boot_snapshot_schedule" {
+  name   = "app-primary-boot-snapshot-schedule"
+  region = var.region
+  
+  snapshot_schedule_policy {
+    schedule {
+      hourly_schedule {
+        hours_in_cycle = var.disk_snapshot_hours_in_cycle
+        start_time     = var.disk_snapshot_start_time
+      }
+    }
+    
+    retention_policy {
+      max_retention_days    = var.disk_snapshot_retention_days
+      on_source_disk_delete = "KEEP_AUTO_SNAPSHOTS"
+    }
+    
+    snapshot_properties {
+      storage_locations = [var.region]
+      guest_flush       = true  # Ensures data consistency
+    }
+  }
+}
+
+# Attach the snapshot schedule to the primary boot disk
+resource "google_compute_disk_resource_policy_attachment" "primary_boot_snapshot_attachment" {
+  name   = google_compute_resource_policy.primary_boot_snapshot_schedule.name
+  disk   = google_compute_disk.primary_boot_disk.name
+  zone   = var.primary_zone
 }
 
 # -----------------------------------------------------------------------------
@@ -83,4 +115,3 @@ resource "google_storage_bucket_iam_binding" "backup_bucket_binding" {
     "serviceAccount:${google_service_account.dr_service_account.email}"
   ]
 }
-

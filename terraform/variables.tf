@@ -191,3 +191,21 @@ variable "iap_source_ranges" {
   description = "Source IP ranges for Identity-Aware Proxy (IAP) SSH access"
   type        = list(string)
 }
+
+# -----------------------------------------------------------------------------
+# DISK SNAPSHOT CONFIGURATION
+# -----------------------------------------------------------------------------
+variable "disk_snapshot_retention_days" {
+  description = "Number of days to retain disk snapshots"
+  type        = number
+}
+
+variable "disk_snapshot_hours_in_cycle" {
+  description = "Hours between disk snapshots (1 = hourly)"
+  type        = number
+}
+
+variable "disk_snapshot_start_time" {
+  description = "Start time for disk snapshots (24h format)"
+  type        = string
+}
