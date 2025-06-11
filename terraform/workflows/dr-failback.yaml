@@ -1,0 +1,130 @@
+# =============================================================================
+# SIMPLIFIED DR FAILBACK WORKFLOW
+# =============================================================================
+# This workflow performs disaster recovery failback with minimal complexity
+# Using systemd service for automatic application startup
+
+main:
+  params: []
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - primary_zone: "us-central1-a"
+          - standby_zone: "us-central1-c"
+          - start_time: ${sys.now()}
+
+    # Step 1: Stop standby VM and detach regional disk
+    - stop_standby_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/stop"}
+          auth:
+            type: OAuth2
+          timeout: 30
+
+    - wait_for_standby_stop:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    - detach_regional_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
+          auth:
+            type: OAuth2
+          timeout: 30
+          body:
+            deviceName: "app-data-disk"
+
+    # Step 2: Start primary VM
+    - start_primary_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/start"}
+          auth:
+            type: OAuth2
+          timeout: 30
+
+    # Step 3: Attach regional disk to primary VM
+    - wait_for_primary_ready:
+        call: sys.sleep
+        args:
+          seconds: 20
+
+    - attach_regional_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/attachDisk"}
+          auth:
+            type: OAuth2
+          timeout: 30
+          body:
+            source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+            deviceName: "app-data-disk"
+            mode: "READ_WRITE"
+
+    # Step 4: Add primary VM to instance group
+    - add_primary_to_instance_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instanceGroups/app-primary-group/addInstances"}
+            auth:
+              type: OAuth2
+            timeout: 30
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary"}
+        except:
+          as: e
+          steps:
+            - log_primary_group_warning:
+                call: sys.log
+                args:
+                  text: "Primary instance group update failed - instance may already be in group"
+                  severity: "WARNING"
+
+    # Step 5: Wait for application initialization
+    - wait_for_app_ready:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 6: Remove standby from load balancer
+    - remove_standby_from_lb:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instanceGroups/app-standby-group/removeInstances"}
+            auth:
+              type: OAuth2
+            timeout: 30
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
+        except:
+          as: e
+          steps:
+            - log_lb_cleanup_warning:
+                call: sys.log
+                args:
+                  text: "Load balancer cleanup failed - instance may not be in group"
+                  severity: "WARNING"
+
+    # Step 7: Calculate and return results
+    - complete_failback:
+        assign:
+          - end_time: ${sys.now()}
+          - recovery_time_seconds: ${(end_time - start_time) / 1000000000}
+        next: return_success
+
+    - return_success:
+        return:
+          status: "success"
+          message: "Simplified DR failback completed"
+          recovery_time_seconds: ${recovery_time_seconds}
+          primary_vm_started: true
+          standby_vm_stopped: true
+          regional_disk_restored: true

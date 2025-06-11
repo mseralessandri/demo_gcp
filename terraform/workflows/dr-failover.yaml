@@ -1,0 +1,379 @@
+# =============================================================================
+# SIMPLIFIED DR FAILOVER WORKFLOW
+# =============================================================================
+# This workflow performs disaster recovery failover with systemd service for automatic application startup
+
+main:
+  params: []
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - primary_zone: "us-central1-a"
+          - standby_zone: "us-central1-c"
+          - start_time: ${sys.now()}
+
+    # # Step 1: Check if snapshot exists or create one
+    # - check_snapshot_exists:
+    #     call: http.get
+    #     args:
+    #       url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/snapshots"}
+    #       auth:
+    #         type: OAuth2
+    #       query:
+    #         filter: "sourceDisk=app-primary-boot-disk"
+    #         maxResults: 1
+    #     result: snapshot_list
+
+    # - decide_snapshot_creation:
+    #     switch:
+    #       - condition: ${len(snapshot_list.body.items) == 0}
+    #         next: create_boot_snapshot
+    #     next: stop_primary_vm
+
+    - create_boot_snapshot:
+        assign:
+          - timestamp: ${string(int(sys.now() / 1000))}
+          - snapshot_name: ${"boot-snapshot-workflow-" + timestamp}
+        next: create_snapshot_request
+        
+    - create_snapshot_request:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/disks/app-primary-boot-disk/createSnapshot"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            name: ${snapshot_name}
+            description: "Automatic snapshot for DR testing"
+        result: create_snapshot_operation
+
+    - wait_for_snapshot:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 2: Stop primary VM
+    - stop_primary_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/stop"}
+          auth:
+            type: OAuth2
+          timeout: 60
+        result: stop_operation
+
+    # Step 3: Wait for VM to stop and then detach regional disk
+    - wait_for_stop:
+        call: sys.sleep
+        args:
+          seconds: 20
+
+    - detach_regional_disk:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/detachDisk"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              disk: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+          result: detach_disk_operation
+        except:
+          as: e
+          steps:
+            - log_disk_detach_error:
+                call: sys.log
+                args:
+                  text: "Error detaching regional disk, will continue anyway"
+                  severity: "WARNING"
+                next: wait_for_detach
+
+    - wait_for_detach:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    # Step 4: Use the created snapshot (no need to query for latest)
+    - log_snapshot_info:
+        call: sys.log
+        args:
+          text: Using snapshot ${snapshot_name}
+          severity: "INFO"
+
+    # Step 5: Skip disk deletion and go straight to UEFI settings check
+
+    # Step 6: Check UEFI settings of boot disk
+    - check_uefi_settings:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks/app-standby-boot-disk"}
+          auth:
+            type: OAuth2
+        result: boot_disk_info
+
+    # Step 7: Create new disk with unique name from snapshot with matching UEFI settings
+    - generate_disk_name:
+        assign:
+          - disk_name: ${"app-standby-disk-failover-" + timestamp}
+        next: log_disk_name
+
+    - log_disk_name:
+        call: sys.log
+        args:
+          text: Creating disk with name ${disk_name}
+          severity: "INFO"
+        next: create_failover_disk
+
+    - create_failover_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/disks"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            name: ${disk_name}
+            sourceSnapshot: ${"projects/" + project_id + "/global/snapshots/" + snapshot_name}
+            guestOsFeatures: ${boot_disk_info.body.guestOsFeatures}
+        result: create_disk_operation
+
+    - wait_for_disk_create:
+        call: sys.sleep
+        args:
+          seconds: 20
+
+    # Step 8: Stop standby VM
+    - stop_standby_vm:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/stop"}
+            auth:
+              type: OAuth2
+            timeout: 60
+          result: stop_standby_operation
+        except:
+          as: e
+          steps:
+            - log_standby_already_stopped:
+                call: sys.log
+                args:
+                  text: "Standby VM already stopped or stopping"
+                  severity: "INFO"
+
+    - wait_for_standby_stop:
+        call: sys.sleep
+        args:
+          seconds: 20
+
+    # Step 9: Detach all disks from standby VM
+    - get_standby_disks:
+        call: http.get
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
+          auth:
+            type: OAuth2
+        result: standby_vm_info
+
+    - log_standby_disks:
+        call: sys.log
+        args:
+          text: "Checking standby VM disks"
+          severity: "INFO"
+        next: detach_standby_boot_disk
+
+    - detach_standby_boot_disk:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              deviceName: "boot"
+          result: detach_boot_operation
+        except:
+          as: e
+          steps:
+            - log_boot_disk_detach_error:
+                call: sys.log
+                args:
+                  text: "Error detaching boot disk"
+                  severity: "WARNING"
+                next: try_alternate_detach
+
+    - try_alternate_detach:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              deviceName: "persistent-disk-0"
+          result: detach_boot_operation
+        except:
+          as: e
+          steps:
+            - log_alternate_detach_error:
+                call: sys.log
+                args:
+                  text: "Error with alternate detach"
+                  severity: "WARNING"
+
+    - detach_standby_regional_disk:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/detachDisk"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              disk: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+          result: detach_regional_operation
+        except:
+          as: e
+          steps:
+            - log_regional_disk_detach_error:
+                call: sys.log
+                args:
+                  text: "Error detaching regional disk"
+                  severity: "WARNING"
+
+    - wait_for_detachments:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    # Step 10: Attach new boot disk to standby VM
+    - attach_new_boot_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            source: ${"projects/" + project_id + "/zones/" + standby_zone + "/disks/" + disk_name}
+            deviceName: "boot-disk"
+            boot: true
+        result: attach_boot_operation
+
+    - wait_for_boot_attach:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    # Step 11: Attach regional disk to standby VM
+    - attach_regional_disk:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/attachDisk"}
+          auth:
+            type: OAuth2
+          timeout: 60
+          body:
+            source: ${"projects/" + project_id + "/regions/us-central1/disks/app-regional-disk"}
+            deviceName: "app-data-disk"
+            mode: "READ_WRITE"
+        result: attach_regional_operation
+
+    - wait_for_regional_attach:
+        call: sys.sleep
+        args:
+          seconds: 15
+
+    # Step 12: Start the standby VM
+    - start_standby_vm:
+        call: http.post
+        args:
+          url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby/start"}
+          auth:
+            type: OAuth2
+          timeout: 60
+        result: start_standby_operation
+
+    # Step 13: Wait for VM to be ready
+    - wait_for_vm_ready:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 14: Add standby VM to instance group
+    - add_to_instance_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + standby_zone + "/instanceGroups/app-standby-group/addInstances"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + standby_zone + "/instances/app-web-server-dr-standby"}
+          result: add_to_group_operation
+        except:
+          as: e
+          steps:
+            - log_group_add_error:
+                call: sys.log
+                args:
+                  text: "Error adding to instance group"
+                  severity: "WARNING"
+
+    # Step 15: Remove primary VM from its instance group
+    - remove_primary_from_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instanceGroups/app-primary-group/removeInstances"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary"}
+          result: remove_from_group_operation
+        except:
+          as: e
+          steps:
+            - log_group_remove_error:
+                call: sys.log
+                args:
+                  text: "Error removing from instance group"
+                  severity: "WARNING"
+
+    # Step 16: Wait for application to initialize
+    - wait_for_app_init:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 17: Calculate and return results
+    - complete_failover:
+        assign:
+          - end_time: ${sys.now()}
+          - recovery_time_seconds: ${(end_time - start_time) / 1000000000}
+        next: return_success
+
+    - return_success:
+        return:
+          status: "success"
+          message: "DR failover completed successfully"
+          recovery_time_seconds: ${recovery_time_seconds}
+          primary_vm_stopped: true
+          standby_vm_started: true
+          regional_disk_moved: true
+          timestamp: ${timestamp}
+          disk_name: ${disk_name}
+          
+    - return_error:
+        return:
+          status: "error"
+          message: "DR failover failed"

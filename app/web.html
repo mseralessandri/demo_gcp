@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Disaster Recovery Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 20px;
+            background-color: #f8f4f0;
+            color: #333;
+        }
+        h1, h2 {
+            color: #e95420;
+        }
+        form {
+            margin-bottom: 20px;
+        }
+        table {
+            width: 80%;
+            margin: 0 auto;
+            border-collapse: collapse;
+            background: white;
+        }
+        th, td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+        th {
+            background-color: #e95420;
+            color: white;
+        }
+        .disk-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #fff;
+        }
+        .root-disk {
+            border-left: 5px solid #ff9800;
+        }
+        .regional-disk {
+            border-left: 5px solid #4caf50;
+        }
+        .disk-info {
+            text-align: left;
+            margin-bottom: 10px;
+            font-weight: bold;
+        }
+        pre {
+            background: white;
+            padding: 10px;
+            border: 1px solid #ddd;
+            display: inline-block;
+            text-align: left;
+            width: 100%;
+            color: #333;
+            overflow: auto;
+            max-height: 200px;
+            margin: 0;
+        }
+        input[type="text"], button {
+            padding: 8px;
+            margin: 5px;
+            border: 1px solid #e95420;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #e95420;
+            color: white;
+            cursor: pointer;
+            border: none;
+            padding: 10px 15px;
+        }
+        button:hover {
+            background-color: #c44112;
+        }
+    </style>
+</head>
+<body>
+    <h1>Disaster Recovery Demo</h1>
+    <form id="dataForm">
+        <label>Enter Data:</label>
+        <input type="text" id="dataInput" required>
+        <button type="submit">Save</button>
+    </form>
+    
+    <h2>Database</h2>
+    <table id="dbTable">
+        <tr>
+            <th>ID</th>
+            <th>Data</th>
+        </tr>
+    </table>
+    
+    <h2>Storage</h2>
+    
+    <div class="disk-section root-disk">
+        <div class="disk-info">Root Disk</div>
+        <pre id="rootDiskData">Loading...</pre>
+    </div>
+    
+    <div class="disk-section regional-disk">
+        <div class="disk-info">Regional Disk</div>
+        <pre id="regionalDiskData">Loading...</pre>
+    </div>
+    
+    <script>
+        document.getElementById("dataForm").addEventListener("submit", function(event) {
+            event.preventDefault();
+            const data = document.getElementById("dataInput").value;
+            
+            fetch("/write", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({ data: data })
+            }).then(response => {
+                if (response.ok) {
+                    document.getElementById("dataInput").value = "";
+                    fetchData();
+                }
+            }).catch(error => console.error("Error sending data:", error));
+        });
+        
+        function fetchData() {
+            fetch('/read')
+                .then(response => response.json())
+                .then(data => {
+                    const dbTable = document.getElementById('dbTable');
+                    dbTable.innerHTML = '<tr><th>ID</th><th>Data</th></tr>';
+                    data.database.forEach((entry, index) => {
+                        let row = dbTable.insertRow();
+                        row.insertCell(0).innerText = index + 1;
+                        row.insertCell(1).innerText = entry;
+                    });
+                    document.getElementById('rootDiskData').innerText = data.rootDiskFile;
+                    document.getElementById('regionalDiskData').innerText = data.regionalDiskFile;
+                })
+                .catch(error => console.error('Error fetching data:', error));
+        }
+        setInterval(fetchData, 3000);
+        fetchData();
+    </script>
+</body>
+</html>
