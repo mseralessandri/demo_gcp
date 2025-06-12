@@ -65,12 +65,24 @@ for SNAPSHOT in $REGIONAL_SNAPSHOTS; do
   run_cmd "gcloud compute snapshots delete $SNAPSHOT --quiet" "Snapshot $SNAPSHOT not found or already deleted"
 done
 
-# Delete snapshot schedules
-status "Deleting snapshot schedules"
+echo "Deleting consistency group snapshots..."
+CONSISTENCY_SNAPSHOTS=$(gcloud compute snapshots list --filter="labels.purpose=consistency-group" --format="value(name)" 2>/dev/null || echo "")
+for SNAPSHOT in $CONSISTENCY_SNAPSHOTS; do
+  run_cmd "gcloud compute snapshots delete $SNAPSHOT --quiet" "Snapshot $SNAPSHOT not found or already deleted"
+done
+
+# Delete snapshot schedules and consistency groups
+status "Deleting snapshot schedules and consistency groups"
 SCHEDULES=$(gcloud compute resource-policies list --filter="name:app-snapshot-schedule" --format="value(name)" 2>/dev/null || echo "")
 for SCHEDULE in $SCHEDULES; do
   run_cmd "gcloud compute resource-policies delete $SCHEDULE --region=us-central1 --quiet" "Snapshot schedule $SCHEDULE not found or already deleted"
 done
+
+echo "Deleting primary boot snapshot schedule..."
+run_cmd "gcloud compute resource-policies delete app-primary-boot-snapshot-schedule --region=us-central1 --quiet" "Primary boot snapshot schedule not found or already deleted"
+
+echo "Deleting consistency group..."
+run_cmd "gcloud compute resource-policies delete app-consistency-group --region=us-central1 --quiet" "Consistency group not found or already deleted"
 
 # Delete instance groups
 status "Deleting instance groups"

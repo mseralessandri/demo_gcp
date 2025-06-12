@@ -1,9 +1,6 @@
 # =============================================================================
-# NETWORKING CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL MODULE
+# NETWORKING CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL 
 # =============================================================================
-# This file contains the networking resources for the DR solution, including
-# load balancing, health checks, and instance groups.
-
 # -----------------------------------------------------------------------------
 # HEALTH CHECK
 # -----------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 # =============================================================================
-# BACKUP CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL MODULE
+# BACKUP CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL 
 # =============================================================================
 # This file contains the backup and recovery resources for the DR solution,
 # including disk snapshots and database backups.
@@ -114,4 +114,51 @@ resource "google_storage_bucket_iam_binding" "backup_bucket_binding" {
   members = [
     "serviceAccount:${google_service_account.dr_service_account.email}"
   ]
+}
+
+
+# -----------------------------------------------------------------------------
+# CONSISTENCY GROUPS AND REPLICATION
+# -----------------------------------------------------------------------------
+
+# Consistency group for application-consistent snapshots
+resource "google_compute_resource_policy" "consistency_group" {
+  name   = "app-consistency-group"
+  region = var.region
+  
+  snapshot_schedule_policy {
+    schedule {
+      daily_schedule {
+        days_in_cycle = 1
+        start_time    = "04:00"
+      }
+    }
+    
+    retention_policy {
+      max_retention_days    = 7
+      on_source_disk_delete = "KEEP_AUTO_SNAPSHOTS"
+    }
+    
+    snapshot_properties {
+      guest_flush       = true
+      storage_locations = ["us"]
+      labels = {
+        "purpose" = "consistency-group"
+      }
+    }
+  }
+}
+
+
+# Attach policies to disks
+resource "google_compute_disk_resource_policy_attachment" "primary_boot_consistency" {
+  name   = google_compute_resource_policy.consistency_group.name
+  disk   = google_compute_disk.primary_boot_disk.name
+  zone   = var.primary_zone
+}
+
+resource "google_compute_region_disk_resource_policy_attachment" "regional_disk_consistency" {
+  name   = google_compute_resource_policy.consistency_group.name
+  disk   = google_compute_region_disk.regional_disk.name
+  region = var.region
 }

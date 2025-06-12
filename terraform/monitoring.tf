@@ -1,10 +1,6 @@
 # =============================================================================
-# MONITORING CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL MODULE
+# MONITORING CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL 
 # =============================================================================
-# This file contains the monitoring and alerting resources for the DR solution,
-# using a hybrid approach that leverages both default GCP dashboards and
-# custom metrics.
-
 # -----------------------------------------------------------------------------
 # NOTIFICATION CHANNELS
 # -----------------------------------------------------------------------------
@@ -120,9 +116,6 @@ resource "google_logging_metric" "app_error_metric" {
   }
 }
 
-# Note: The alert policy has been moved to a separate file (monitoring_alerts.tf)
-# Apply the main configuration first, wait 10 minutes for the metric to be available,
-# then apply the monitoring_alerts.tf configuration.
 
 # -----------------------------------------------------------------------------
 # CUSTOM METRICS

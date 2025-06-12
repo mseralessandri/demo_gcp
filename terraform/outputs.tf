@@ -1,8 +1,6 @@
 # =============================================================================
-# OUTPUTS FOR DR ACTIVE-PASSIVE COMPLETE ZONAL MODULE
+# OUTPUTS FOR DR ACTIVE-PASSIVE COMPLETE ZONAL 
 # =============================================================================
-# This file defines the outputs that will be available to the module users.
-
 # -----------------------------------------------------------------------------
 # COMPUTE OUTPUTS
 # -----------------------------------------------------------------------------

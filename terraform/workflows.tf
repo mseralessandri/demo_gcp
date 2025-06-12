@@ -1,8 +1,6 @@
 # =============================================================================
 # WORKFLOW CONFIGURATION FOR DR ACTIVE-PASSIVE COMPLETE ZONAL MODULE
 # =============================================================================
-# This file contains the Google Cloud Workflows definitions for disaster recovery
-# operations, including failover and failback processes.
 
 # -----------------------------------------------------------------------------
 # SERVICE ACCOUNT

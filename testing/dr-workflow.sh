@@ -2,12 +2,6 @@
 # =============================================================================
 # DR WORKFLOW TEST SCRIPT
 # =============================================================================
-# This script provides on-demand testing capabilities for the DR solution
-# by triggering Google Cloud Workflows.
-
-# -----------------------------------------------------------------------------
-# HELPER FUNCTIONS
-# -----------------------------------------------------------------------------
 
 # Function to display status
 status() {
