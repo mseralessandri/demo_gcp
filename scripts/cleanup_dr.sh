@@ -43,6 +43,8 @@ status "Using project: $PROJECT_ID"
 status "Deleting compute instances"
 run_cmd "gcloud compute instances delete app-web-server-dr-primary --zone=us-central1-a --quiet" "Primary VM not found or already deleted"
 run_cmd "gcloud compute instances delete app-web-server-dr-standby --zone=us-central1-c --quiet" "Standby VM not found or already deleted"
+run_cmd "gcloud compute instances delete app-web-server-dr-secondary-primary --zone=us-east1-b --quiet" "Secondary primary VM not found or already deleted"
+run_cmd "gcloud compute instances delete app-web-server-dr-secondary-standby --zone=us-east1-c --quiet" "Secondary standby VM not found or already deleted"
 
 # Delete disks
 status "Deleting disks"
@@ -50,11 +52,13 @@ run_cmd "gcloud compute disks delete app-primary-boot-disk --zone=us-central1-a 
 run_cmd "gcloud compute disks delete app-standby-boot-disk --zone=us-central1-c --quiet" "Standby boot disk not found or already deleted"
 run_cmd "gcloud compute disks delete app-regional-disk --region=us-central1 --quiet" "Regional disk not found or already deleted"
 run_cmd "gcloud compute disks delete app-standby-disk-failover --zone=us-central1-c --quiet" "Failover disk not found or already deleted"
+run_cmd "gcloud compute disks delete app-secondary-primary-boot-disk --zone=us-east1-b --quiet" "Secondary primary boot disk not found or already deleted"
+run_cmd "gcloud compute disks delete app-secondary-standby-boot-disk --zone=us-east1-c --quiet" "Secondary standby boot disk not found or already deleted"
 
 # Delete compute engine snapshots
 status "Deleting Compute Engine snapshots"
 echo "Deleting boot disk snapshots..."
-BOOT_SNAPSHOTS=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk OR sourceDisk:app-standby-boot-disk" --format="value(name)" 2>/dev/null || echo "")
+BOOT_SNAPSHOTS=$(gcloud compute snapshots list --filter="sourceDisk:app-primary-boot-disk OR sourceDisk:app-standby-boot-disk OR sourceDisk:app-secondary-primary-boot-disk OR sourceDisk:app-secondary-standby-boot-disk" --format="value(name)" 2>/dev/null || echo "")
 for SNAPSHOT in $BOOT_SNAPSHOTS; do
   run_cmd "gcloud compute snapshots delete $SNAPSHOT --quiet" "Snapshot $SNAPSHOT not found or already deleted"
 done
@@ -65,17 +69,34 @@ for SNAPSHOT in $REGIONAL_SNAPSHOTS; do
   run_cmd "gcloud compute snapshots delete $SNAPSHOT --quiet" "Snapshot $SNAPSHOT not found or already deleted"
 done
 
-# Delete snapshot schedules
-status "Deleting snapshot schedules"
+echo "Deleting consistency group snapshots..."
+CONSISTENCY_SNAPSHOTS=$(gcloud compute snapshots list --filter="labels.purpose=consistency-group" --format="value(name)" 2>/dev/null || echo "")
+for SNAPSHOT in $CONSISTENCY_SNAPSHOTS; do
+  run_cmd "gcloud compute snapshots delete $SNAPSHOT --quiet" "Snapshot $SNAPSHOT not found or already deleted"
+done
+
+# Delete snapshot schedules and consistency groups
+status "Deleting snapshot schedules and consistency groups"
 SCHEDULES=$(gcloud compute resource-policies list --filter="name:app-snapshot-schedule" --format="value(name)" 2>/dev/null || echo "")
 for SCHEDULE in $SCHEDULES; do
   run_cmd "gcloud compute resource-policies delete $SCHEDULE --region=us-central1 --quiet" "Snapshot schedule $SCHEDULE not found or already deleted"
 done
 
+echo "Deleting primary boot snapshot schedule..."
+run_cmd "gcloud compute resource-policies delete app-primary-boot-snapshot-schedule --region=us-central1 --quiet" "Primary boot snapshot schedule not found or already deleted"
+
+echo "Deleting consistency group..."
+run_cmd "gcloud compute resource-policies delete app-consistency-group --region=us-central1 --quiet" "Consistency group not found or already deleted"
+
+echo "Deleting cross-region replication policy..."
+run_cmd "gcloud compute resource-policies delete app-cross-region-replication --region=us-central1 --quiet" "Cross-region replication policy not found or already deleted"
+
 # Delete instance groups
 status "Deleting instance groups"
 run_cmd "gcloud compute instance-groups unmanaged delete app-primary-group --zone=us-central1-a --quiet" "Primary instance group not found or already deleted"
 run_cmd "gcloud compute instance-groups unmanaged delete app-standby-group --zone=us-central1-c --quiet" "Standby instance group not found or already deleted"
+run_cmd "gcloud compute instance-groups unmanaged delete app-secondary-primary-group --zone=us-east1-b --quiet" "Secondary primary instance group not found or already deleted"
+run_cmd "gcloud compute instance-groups unmanaged delete app-secondary-standby-group --zone=us-east1-c --quiet" "Secondary standby instance group not found or already deleted"
 
 # Delete load balancer components
 status "Deleting load balancer components"
@@ -83,6 +104,9 @@ echo "Deleting forwarding rules..."
 run_cmd "gcloud compute forwarding-rules delete app-http-forwarding-rule --global --quiet" "HTTP forwarding rule not found or already deleted"
 run_cmd "gcloud compute forwarding-rules delete app-https-forwarding-rule --global --quiet" "HTTPS forwarding rule not found or already deleted"
 run_cmd "gcloud compute forwarding-rules delete app-forwarding-rule --global --quiet" "Legacy forwarding rule not found or already deleted"
+
+echo "Deleting global IP address..."
+run_cmd "gcloud compute addresses delete app-lb-ip --global --quiet" "Load balancer IP address not found or already deleted"
 
 echo "Deleting proxies..."
 run_cmd "gcloud compute target-http-proxies delete app-http-proxy --quiet" "HTTP proxy not found or already deleted"
@@ -96,6 +120,7 @@ run_cmd "gcloud compute url-maps delete app-url-map --quiet" "URL map not found 
 
 echo "Deleting backend services..."
 run_cmd "gcloud compute backend-services delete app-backend-service --global --quiet" "Backend service not found or already deleted"
+run_cmd "gcloud compute backend-services delete app-backend-service-multiregion --global --quiet" "Multi-region backend service not found or already deleted"
 
 echo "Deleting health checks..."
 run_cmd "gcloud compute health-checks delete app-health-check --quiet" "Health check not found or already deleted"
@@ -105,6 +130,7 @@ status "Deleting firewall rules"
 run_cmd "gcloud compute firewall-rules delete allow-http-dr --quiet" "HTTP firewall rule not found or already deleted"
 run_cmd "gcloud compute firewall-rules delete allow-ssh-dr --quiet" "SSH firewall rule not found or already deleted"
 run_cmd "gcloud compute firewall-rules delete allow-health-checks-dr --quiet" "Health checks firewall rule not found or already deleted"
+run_cmd "gcloud compute firewall-rules delete allow-ssh-iap-dr --quiet" "IAP SSH firewall rule not found or already deleted"
 
 # Delete database instance and backups
 status "Deleting database instance and backups"
@@ -114,8 +140,10 @@ for BACKUP_ID in $BACKUP_IDS; do
   run_cmd "gcloud sql backups delete $BACKUP_ID --instance=app-db-instance-dr --quiet" "Backup $BACKUP_ID not found or already deleted"
 done
 
-echo "Deleting database instance..."
-run_cmd "gcloud sql instances delete app-db-instance-dr --quiet" "Database instance not found or already deleted"
+echo "Deleting database instances..."
+run_cmd "gcloud sql instances delete app-db-instance-dr --quiet" "Primary database instance not found or already deleted"
+run_cmd "gcloud sql instances delete app-db-instance-dr-secondary --quiet" "Secondary database instance not found or already deleted"
+run_cmd "gcloud sql instances delete app-db-instance-dr-temp --quiet" "Temporary database instance not found or already deleted"
 
 # Delete storage buckets
 status "Deleting storage buckets"
@@ -147,6 +175,8 @@ run_cmd "gcloud scheduler jobs delete dr-quarterly-failover-test --location=us-c
 status "Deleting Cloud Workflows"
 run_cmd "gcloud workflows delete dr-failover-workflow --location=us-central1 --quiet" "Failover workflow not found or already deleted"
 run_cmd "gcloud workflows delete dr-failback-workflow --location=us-central1 --quiet" "Failback workflow not found or already deleted"
+run_cmd "gcloud workflows delete dr-multiregion-failover-workflow --location=us-central1 --quiet" "Multi-region failover workflow not found or already deleted"
+run_cmd "gcloud workflows delete dr-multiregion-failback-workflow --location=us-east1 --quiet" "Multi-region failback workflow not found or already deleted"
 
 # Delete monitoring resources
 status "Deleting monitoring resources"

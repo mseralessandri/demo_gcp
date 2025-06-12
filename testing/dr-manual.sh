@@ -202,6 +202,37 @@ write_custom_metric() {
     --double-value="${metric_value}" 2>/dev/null || true
 }
 
+# Function to create consistency group snapshots
+create_consistency_group_snapshots() {
+  status "CREATING CONSISTENCY GROUP SNAPSHOTS"
+  
+  # Generate a timestamp for the snapshot group
+  SNAPSHOT_TIMESTAMP=$(date +%Y%m%d%H%M%S)
+  
+  # Create snapshot of the boot disk (crash-consistent)
+  status "Creating boot disk snapshot"
+  gcloud compute snapshots create cg-boot-$SNAPSHOT_TIMESTAMP \
+    --source-disk=app-primary-boot-disk \
+    --source-disk-zone=us-central1-a \
+    --labels=purpose=consistency-group,timestamp=$SNAPSHOT_TIMESTAMP
+  
+  # Create snapshot of the regional disk (crash-consistent)
+  status "Creating regional disk snapshot"
+  gcloud compute snapshots create cg-data-$SNAPSHOT_TIMESTAMP \
+    --source-disk=app-regional-disk \
+    --source-disk-region=us-central1 \
+    --labels=purpose=consistency-group,timestamp=$SNAPSHOT_TIMESTAMP
+  
+  # List the created snapshots
+  status "Consistency group snapshots created with timestamp: $SNAPSHOT_TIMESTAMP"
+  echo "Boot snapshot: cg-boot-$SNAPSHOT_TIMESTAMP"
+  echo "Data snapshot: cg-data-$SNAPSHOT_TIMESTAMP"
+  
+  # Verify snapshots
+  status "Verifying snapshots"
+  gcloud compute snapshots list --filter="labels.timestamp=$SNAPSHOT_TIMESTAMP" \
+    --format="table(name,diskSizeGb,creationTimestamp,labels)"
+}
 
 # -----------------------------------------------------------------------------
 # USAGE INFORMATION
@@ -212,11 +243,12 @@ function show_usage {
   echo "Usage: $0 [command]"
   echo ""
   echo "Available commands:"
-  echo "  status        - Show current status of primary and standby resources"
-  echo "  failover      - Simulate failure and perform failover to standby zone"
-  echo "  failback      - Perform failback to primary zone"
-  echo "  snapshot      - Create on-demand snapshots of VM boot disk"
-  echo "  test-all      - Run a complete DR demo (failover + failback)"
+  echo "  status                - Show current status of primary and standby resources"
+  echo "  failover              - Simulate failure and perform failover to standby zone"
+  echo "  failback              - Perform failback to primary zone"
+  echo "  snapshot              - Create on-demand snapshots of VM boot disk"
+  echo "  consistency-snapshot  - Create consistency group snapshots of boot and data disks"
+  echo "  test-all              - Run a complete DR demo (failover + failback)"
   echo ""
 }
 
@@ -628,6 +660,10 @@ case "$1" in
     $0 status
     
     status "Complete DR demo finished successfully!"
+    ;;
+    
+  consistency-snapshot)
+    create_consistency_group_snapshots
     ;;
 
   *)

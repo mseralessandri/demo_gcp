@@ -1,73 +1,89 @@
 #!/bin/bash
-
 # =============================================================================
-# FIX TERRAFORM STATE SCRIPT
+# TERRAFORM STATE FIXER SCRIPT
 # =============================================================================
-# This script removes conflicting resources from Terraform state and re-imports them
+# This script helps fix common Terraform state issues by importing existing
+# resources into the Terraform state.
 
 set -e
 
-PROJECT_ID="microcloud-448817"
-
-echo "Fixing Terraform state for project: $PROJECT_ID"
-
-# Remove resources from state first
-echo "Removing resources from Terraform state..."
-
-terraform state rm module.dr_complete.google_compute_disk.primary_boot_disk 2>/dev/null || echo "Primary boot disk not in state"
-terraform state rm module.dr_complete.google_compute_disk.standby_boot_disk 2>/dev/null || echo "Standby boot disk not in state"
-terraform state rm module.dr_complete.google_compute_region_disk.regional_disk 2>/dev/null || echo "Regional disk not in state"
-terraform state rm module.dr_complete.google_compute_instance.primary_vm 2>/dev/null || echo "Primary VM not in state"
-terraform state rm module.dr_complete.google_compute_instance.standby_vm 2>/dev/null || echo "Standby VM not in state"
-terraform state rm module.dr_complete.google_sql_database_instance.db_instance 2>/dev/null || echo "Database instance not in state"
-
-echo "Re-importing existing resources..."
-
-# Check if primary boot disk exists
-if gcloud compute disks describe app-primary-boot-disk --zone=us-central1-a --project=$PROJECT_ID >/dev/null 2>&1; then
-    echo "Importing primary boot disk..."
-    terraform import module.dr_complete.google_compute_disk.primary_boot_disk projects/$PROJECT_ID/zones/us-central1-a/disks/app-primary-boot-disk
-else
-    echo "Primary boot disk does not exist, will be created."
+# Get the project ID from terraform.tfvars
+PROJECT_ID=$(grep "project_id" terraform/terraform.tfvars | cut -d'"' -f2)
+if [ -z "$PROJECT_ID" ]; then
+  echo "Error: Could not determine project ID from terraform.tfvars"
+  exit 1
 fi
 
-# Check if standby boot disk exists
-if gcloud compute disks describe app-standby-boot-disk --zone=us-central1-c --project=$PROJECT_ID >/dev/null 2>&1; then
-    echo "Importing standby boot disk..."
-    terraform import module.dr_complete.google_compute_disk.standby_boot_disk projects/$PROJECT_ID/zones/us-central1-c/disks/app-standby-boot-disk
-else
-    echo "Standby boot disk does not exist, will be created."
-fi
+echo "Using project ID: $PROJECT_ID"
 
-# Check if regional disk exists
-if gcloud compute disks describe app-regional-disk --region=us-central1 --project=$PROJECT_ID >/dev/null 2>&1; then
-    echo "Importing regional disk..."
-    terraform import module.dr_complete.google_compute_region_disk.regional_disk projects/$PROJECT_ID/regions/us-central1/disks/app-regional-disk
-else
-    echo "Regional disk does not exist, will be created."
-fi
+# Function to import a resource if it's not already in the state
+import_if_not_exists() {
+  local resource_type=$1
+  local resource_name=$2
+  local resource_id=$3
+  
+  echo "Checking if $resource_type.$resource_name is in Terraform state..."
+  if ! terraform -chdir=terraform state list | grep -q "$resource_type.$resource_name"; then
+    echo "Importing $resource_type.$resource_name..."
+    terraform -chdir=terraform import "$resource_type.$resource_name" "$resource_id"
+    echo "Import successful!"
+  else
+    echo "$resource_type.$resource_name is already in Terraform state."
+  fi
+}
 
-# Check if VMs exist
-if gcloud compute instances describe app-web-server-dr-primary --zone=us-central1-a --project=$PROJECT_ID >/dev/null 2>&1; then
-    echo "Importing primary VM..."
-    terraform import module.dr_complete.google_compute_instance.primary_vm projects/$PROJECT_ID/zones/us-central1-a/instances/app-web-server-dr-primary
-else
-    echo "Primary VM does not exist, will be created."
-fi
+# Main menu
+show_menu() {
+  echo "=== Terraform State Fixer ==="
+  echo "1) Import service account"
+  echo "2) Import all resources"
+  echo "3) Exit"
+  echo "Enter your choice: "
+  read -r choice
+  
+  case $choice in
+    1)
+      import_service_account
+      ;;
+    2)
+      import_all_resources
+      ;;
+    3)
+      exit 0
+      ;;
+    *)
+      echo "Invalid choice. Please try again."
+      show_menu
+      ;;
+  esac
+}
 
-if gcloud compute instances describe app-web-server-dr-standby --zone=us-central1-c --project=$PROJECT_ID >/dev/null 2>&1; then
-    echo "Importing standby VM..."
-    terraform import module.dr_complete.google_compute_instance.standby_vm projects/$PROJECT_ID/zones/us-central1-c/instances/app-web-server-dr-standby
-else
-    echo "Standby VM does not exist, will be created."
-fi
+# Import service account
+import_service_account() {
+  echo "Importing service account..."
+  import_if_not_exists "google_service_account" "dr_service_account" \
+    "projects/$PROJECT_ID/serviceAccounts/dr-service-account@$PROJECT_ID.iam.gserviceaccount.com"
+  
+  echo "Done!"
+  show_menu
+}
 
-# Check if database instance exists
-if gcloud sql instances describe app-db-instance-dr --project=$PROJECT_ID >/dev/null 2>&1; then
-    echo "Importing database instance..."
-    terraform import module.dr_complete.google_sql_database_instance.db_instance projects/$PROJECT_ID/instances/app-db-instance-dr
-else
-    echo "Database instance does not exist, will be created."
-fi
+# Import all resources
+import_all_resources() {
+  echo "Importing all resources..."
+  
+  # Service account
+  import_if_not_exists "google_service_account" "dr_service_account" \
+    "projects/$PROJECT_ID/serviceAccounts/dr-service-account@$PROJECT_ID.iam.gserviceaccount.com"
+  
+  # Add more resources here as needed
+  
+  echo "Done!"
+  show_menu
+}
 
-echo "State fix completed. You can now run 'terraform plan' to see what changes are needed."
+# Start the script
+echo "This script will help fix Terraform state issues by importing existing resources."
+echo "Make sure you have the gcloud CLI configured and Terraform initialized."
+echo ""
+show_menu

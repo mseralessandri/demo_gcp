@@ -18,7 +18,7 @@ import (
 	"github.com/joho/godotenv"
 )
 
-var db *sql.DB
+var db *sql.DB //Database connection pool
 var logFile *os.File
 
 const (
@@ -37,12 +37,12 @@ func writeToFile(filepath string, data string) {
 		}
 	}
 	
-	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	file, err := os.OpenFile(filepath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) // Open file for appending, create if it doesn't exist
 	if err != nil {
 		log.Printf("Failed to open file %s: %v", filepath, err)
 		return
 	}
-	defer file.Close()
+	defer file.Close() // Ensure the file is closed after writing when the function exits regardless of success or failure
 	
 	timestamp := time.Now().Format(time.RFC3339)
 	hostname, _ := os.Hostname()
