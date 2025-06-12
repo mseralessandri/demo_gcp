@@ -8,6 +8,9 @@
 # Note: The required providers are already defined in the main.tf file
 # This file should be applied in the same module context
 
+# Note: The create_custom_metric_alerts variable is defined in variables.tf
+# Set it to true in terraform.tfvars after waiting for custom metrics to be available
+
 # -----------------------------------------------------------------------------
 # ALERT POLICIES
 # -----------------------------------------------------------------------------
@@ -15,6 +18,9 @@
 
 # Application error alert
 resource "google_monitoring_alert_policy" "app_error_alert" {
+  # Only create this resource if the variable is set to true
+  count = var.create_custom_metric_alerts ? 1 : 0
+  
   display_name = "DR Application Error Alert"
   combiner     = "OR"
   

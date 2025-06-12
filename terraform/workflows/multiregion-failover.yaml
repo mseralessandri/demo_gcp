@@ -1,0 +1,185 @@
+# =============================================================================
+# MULTI-REGION DR FAILOVER WORKFLOW
+# =============================================================================
+# This workflow performs disaster recovery failover from primary to secondary region
+
+main:
+  params: []
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - primary_region: "us-central1"
+          - secondary_region: "us-east1"
+          - primary_zone: "us-central1-a"
+          - secondary_primary_zone: "us-east1-b"
+          - start_time: ${sys.now()}
+          - timestamp: ${string(int(sys.now() / 1000))}
+
+    # Step 1: Log the start of the failover process
+    - log_start:
+        call: sys.log
+        args:
+          text: "Starting multi-region DR failover from ${primary_region} to ${secondary_region}"
+          severity: "INFO"
+
+    # Step 2: Promote secondary region DB to primary
+    - promote_secondary_db:
+        try:
+          call: http.post
+          args:
+            url: ${"https://sqladmin.googleapis.com/v1/projects/" + project_id + "/instances/app-db-instance-dr-secondary/promoteReplica"}
+            auth:
+              type: OAuth2
+          result: promote_db_operation
+        except:
+          as: e
+          steps:
+            - log_db_promotion_error:
+                call: sys.log
+                args:
+                  text: "Error promoting secondary DB: ${e}"
+                  severity: "WARNING"
+
+    # Step 3: Wait for DB promotion to complete
+    - wait_for_db_promotion:
+        call: sys.sleep
+        args:
+          seconds: 60
+
+    # Step 4: Create a snapshot of the primary boot disk if possible
+    - create_boot_snapshot:
+        assign:
+          - snapshot_name: ${"boot-snapshot-multiregion-" + timestamp}
+
+    # Step 5: Create the snapshot
+    - create_snapshot_request:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/disks/app-primary-boot-disk/createSnapshot"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              name: ${snapshot_name}
+              description: "Automatic snapshot for multi-region DR failover"
+          result: create_snapshot_operation
+        except:
+          as: e
+          steps:
+            - log_snapshot_creation_error:
+                call: sys.log
+                args:
+                  text: "Error creating snapshot: ${e}"
+                  severity: "WARNING"
+
+    # Step 6: Wait for snapshot to complete
+    - wait_for_snapshot:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 7: Start secondary region primary VM
+    - start_secondary_vm:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + secondary_primary_zone + "/instances/app-web-server-dr-secondary-primary/start"}
+            auth:
+              type: OAuth2
+            timeout: 60
+          result: start_vm_operation
+        except:
+          as: e
+          steps:
+            - log_vm_start_error:
+                call: sys.log
+                args:
+                  text: "Error starting secondary VM: ${e}"
+                  severity: "WARNING"
+
+    # Step 8: Wait for VM to start
+    - wait_for_vm_start:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 9: Add VM to instance group
+    - add_to_instance_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + secondary_primary_zone + "/instanceGroups/app-secondary-primary-group/addInstances"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + secondary_primary_zone + "/instances/app-web-server-dr-secondary-primary"}
+          result: add_to_group_operation
+        except:
+          as: e
+          steps:
+            - log_group_add_error:
+                call: sys.log
+                args:
+                  text: "Error adding to instance group: ${e}"
+                  severity: "WARNING"
+
+    # Step 10: Update backend service to route traffic to secondary region
+    - update_backend_service:
+        try:
+          call: http.patch
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/backendServices/app-backend-service"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              backends:
+                # Primary region backends (set to inactive)
+                - group: ${"projects/" + project_id + "/zones/" + primary_zone + "/instanceGroups/app-primary-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 0.0
+                - group: ${"projects/" + project_id + "/zones/us-central1-c/instanceGroups/app-standby-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 0.0
+                # Secondary region backends (set to active)
+                - group: ${"projects/" + project_id + "/zones/" + secondary_primary_zone + "/instanceGroups/app-secondary-primary-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 1.0
+                - group: ${"projects/" + project_id + "/zones/us-east1-c/instanceGroups/app-secondary-standby-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 0.0
+          result: update_backend_operation
+        except:
+          as: e
+          steps:
+            - log_backend_update_error:
+                call: sys.log
+                args:
+                  text: "Error updating backend service: ${e}"
+                  severity: "WARNING"
+
+    # Step 11: Wait for application to initialize
+    - wait_for_app_init:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 12: Calculate and return results
+    - complete_failover:
+        assign:
+          - end_time: ${sys.now()}
+          - recovery_time_seconds: ${(end_time - start_time) / 1000000000}
+
+    # Step 13: Return success
+    - return_success:
+        return:
+          status: "success"
+          message: "Multi-region DR failover completed successfully"
+          recovery_time_seconds: ${recovery_time_seconds}
+          primary_region_status: "inactive"
+          secondary_region_status: "active"
+          timestamp: ${timestamp}

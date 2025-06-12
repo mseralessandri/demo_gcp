@@ -1,0 +1,264 @@
+# =============================================================================
+# MULTI-REGION DR FAILBACK WORKFLOW
+# =============================================================================
+# This workflow performs disaster recovery failback from secondary to primary region
+
+main:
+  params: []
+  steps:
+    - init:
+        assign:
+          - project_id: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - primary_region: "us-central1"
+          - secondary_region: "us-east1"
+          - primary_zone: "us-central1-a"
+          - secondary_primary_zone: "us-east1-b"
+          - start_time: ${sys.now()}
+          - timestamp: ${string(int(sys.now() / 1000))}
+
+    # Step 1: Log the start of the failback process
+    - log_start:
+        call: sys.log
+        args:
+          text: "Starting multi-region DR failback from ${secondary_region} to ${primary_region}"
+          severity: "INFO"
+
+    # Step 2: Create new replica in primary region
+    - create_primary_replica:
+        try:
+          call: http.post
+          args:
+            url: ${"https://sqladmin.googleapis.com/v1/projects/" + project_id + "/instances"}
+            auth:
+              type: OAuth2
+            body:
+              name: "app-db-instance-dr-temp"
+              region: ${primary_region}
+              databaseVersion: "MYSQL_8_0"
+              masterInstanceName: "app-db-instance-dr-secondary"
+              replicaConfiguration:
+                failoverTarget: false
+              settings:
+                tier: "db-n1-standard-1"
+                availabilityType: "REGIONAL"
+                backupConfiguration:
+                  enabled: true
+                  binaryLogEnabled: true
+          result: create_replica_operation
+        except:
+          as: e
+          steps:
+            - log_replica_creation_error:
+                call: sys.log
+                args:
+                  text: "Error creating primary replica: ${e}"
+                  severity: "WARNING"
+
+    # Step 3: Wait for replica creation
+    - wait_for_replica_creation:
+        call: sys.sleep
+        args:
+          seconds: 300
+
+    # Step 4: Promote primary region replica to master
+    - promote_primary_replica:
+        try:
+          call: http.post
+          args:
+            url: ${"https://sqladmin.googleapis.com/v1/projects/" + project_id + "/instances/app-db-instance-dr-temp/promoteReplica"}
+            auth:
+              type: OAuth2
+          result: promote_primary_operation
+        except:
+          as: e
+          steps:
+            - log_promotion_error:
+                call: sys.log
+                args:
+                  text: "Error promoting primary replica: ${e}"
+                  severity: "WARNING"
+
+    # Step 5: Wait for promotion
+    - wait_for_promotion:
+        call: sys.sleep
+        args:
+          seconds: 120
+
+    # Step 6: Start primary VM
+    - start_primary_vm:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/start"}
+            auth:
+              type: OAuth2
+            timeout: 60
+          result: start_vm_operation
+        except:
+          as: e
+          steps:
+            - log_vm_start_error:
+                call: sys.log
+                args:
+                  text: "Error starting primary VM: ${e}"
+                  severity: "WARNING"
+
+    # Step 7: Wait for VM to start
+    - wait_for_vm_start:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 8: Update VM to use new database
+    - update_vm_metadata:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary/setMetadata"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              fingerprint: ${sys.get_env("VM_METADATA_FINGERPRINT", "")}
+              items:
+                - key: "startup-script"
+                  value: |
+                    #!/bin/bash
+                    # Update database connection to point to the new primary
+                    sed -i 's/app-db-instance-dr/app-db-instance-dr-temp/g' /etc/systemd/system/app.service
+                    systemctl daemon-reload
+                    systemctl restart app
+          result: update_metadata_operation
+        except:
+          as: e
+          steps:
+            - log_metadata_update_error:
+                call: sys.log
+                args:
+                  text: "Error updating VM metadata: ${e}"
+                  severity: "WARNING"
+
+    # Step 9: Add primary VM to instance group
+    - add_to_primary_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + primary_zone + "/instanceGroups/app-primary-group/addInstances"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + primary_zone + "/instances/app-web-server-dr-primary"}
+          result: add_to_group_operation
+        except:
+          as: e
+          steps:
+            - log_group_add_error:
+                call: sys.log
+                args:
+                  text: "Error adding to instance group: ${e}"
+                  severity: "WARNING"
+
+    # Step 10: Update backend service to route traffic back to primary region
+    - update_backend_service:
+        try:
+          call: http.patch
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/global/backendServices/app-backend-service"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              backends:
+                # Primary region backends (set to active)
+                - group: ${"projects/" + project_id + "/zones/" + primary_zone + "/instanceGroups/app-primary-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 1.0
+                - group: ${"projects/" + project_id + "/zones/us-central1-c/instanceGroups/app-standby-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 0.0
+                # Secondary region backends (set to inactive)
+                - group: ${"projects/" + project_id + "/zones/" + secondary_primary_zone + "/instanceGroups/app-secondary-primary-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 0.0
+                - group: ${"projects/" + project_id + "/zones/us-east1-c/instanceGroups/app-secondary-standby-group"}
+                  balancingMode: "UTILIZATION"
+                  capacityScaler: 0.0
+          result: update_backend_operation
+        except:
+          as: e
+          steps:
+            - log_backend_update_error:
+                call: sys.log
+                args:
+                  text: "Error updating backend service: ${e}"
+                  severity: "WARNING"
+
+    # Step 11: Remove secondary VM from instance group
+    - remove_from_secondary_group:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + secondary_primary_zone + "/instanceGroups/app-secondary-primary-group/removeInstances"}
+            auth:
+              type: OAuth2
+            timeout: 60
+            body:
+              instances:
+                - instance: ${"projects/" + project_id + "/zones/" + secondary_primary_zone + "/instances/app-web-server-dr-secondary-primary"}
+          result: remove_from_group_operation
+        except:
+          as: e
+          steps:
+            - log_group_remove_error:
+                call: sys.log
+                args:
+                  text: "Error removing from instance group: ${e}"
+                  severity: "WARNING"
+
+    # Step 12: Stop secondary VM
+    - stop_secondary_vm:
+        try:
+          call: http.post
+          args:
+            url: ${"https://compute.googleapis.com/compute/v1/projects/" + project_id + "/zones/" + secondary_primary_zone + "/instances/app-web-server-dr-secondary-primary/stop"}
+            auth:
+              type: OAuth2
+            timeout: 60
+          result: stop_vm_operation
+        except:
+          as: e
+          steps:
+            - log_vm_stop_error:
+                call: sys.log
+                args:
+                  text: "Error stopping secondary VM: ${e}"
+                  severity: "WARNING"
+
+    # Step 13: Wait for application to initialize
+    - wait_for_app_init:
+        call: sys.sleep
+        args:
+          seconds: 30
+
+    # Step 14: Calculate and return results
+    - complete_failback:
+        assign:
+          - end_time: ${sys.now()}
+          - recovery_time_seconds: ${(end_time - start_time) / 1000000000}
+        next: return_success
+
+    - return_success:
+        return:
+          status: "success"
+          message: "Multi-region DR failback completed successfully"
+          recovery_time_seconds: ${recovery_time_seconds}
+          primary_region_status: "active"
+          secondary_region_status: "inactive"
+          timestamp: ${timestamp}
+          
+    - return_error:
+        return:
+          status: "error"
+          message: "Multi-region DR failback failed"

@@ -166,7 +166,6 @@ resource "google_compute_instance" "standby_vm" {
   }
 
   # Use the same setup script as primary VM
-  # The script will detect if it's running on a restored VM and handle accordingly
   metadata_startup_script = templatefile(var.setup_script_path, {
     db_host = google_sql_database_instance.db_instance.private_ip_address
     GO_VERSION = var.go_version

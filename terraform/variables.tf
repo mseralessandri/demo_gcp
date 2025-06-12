@@ -149,6 +149,12 @@ variable "replication_lag_threshold_ms" {
   type        = number
 }
 
+variable "create_custom_metric_alerts" {
+  description = "Whether to create alert policies that depend on custom metrics"
+  type        = bool
+  default     = false
+}
+
 # -----------------------------------------------------------------------------
 # WORKFLOW CONFIGURATION
 # -----------------------------------------------------------------------------
@@ -208,4 +214,38 @@ variable "disk_snapshot_hours_in_cycle" {
 variable "disk_snapshot_start_time" {
   description = "Start time for disk snapshots (24h format)"
   type        = string
+}
+
+# -----------------------------------------------------------------------------
+# MULTI-REGION DR CONFIGURATION
+# -----------------------------------------------------------------------------
+
+variable "secondary_region" {
+  description = "Secondary region for multi-region DR"
+  type        = string
+  default     = "us-east1"
+}
+
+variable "secondary_primary_zone" {
+  description = "Primary zone in secondary region"
+  type        = string
+  default     = "us-east1-b"
+}
+
+variable "secondary_standby_zone" {
+  description = "Standby zone in secondary region"
+  type        = string
+  default     = "us-east1-c"
+}
+
+variable "multiregion_failover_workflow_path" {
+  description = "Path to the multi-region DR failover workflow YAML file"
+  type        = string
+  default     = "./workflows/multiregion-failover.yaml"
+}
+
+variable "multiregion_failback_workflow_path" {
+  description = "Path to the multi-region DR failback workflow YAML file"
+  type        = string
+  default     = "./workflows/multiregion-failback.yaml"
 }
